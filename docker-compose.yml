@@ -1,0 +1,27 @@
+services:
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+
+  manim-mcp:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      MANIM_MCP_S3_ENDPOINT: minio:9000
+      MANIM_MCP_S3_ACCESS_KEY: minioadmin
+      MANIM_MCP_S3_SECRET_KEY: minioadmin
+      MANIM_MCP_GEMINI_API_KEY: ${MANIM_MCP_GEMINI_API_KEY}
+    depends_on:
+      - minio
+
+volumes:
+  minio-data:

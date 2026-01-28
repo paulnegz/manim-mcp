@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "manim-mcp"
+version = "0.1.0"
+description = "MCP server — text to Manim animation video"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "boto3>=1.28.0",
+    "aiosqlite>=0.19.0",
+    "google-genai>=1.0.0",
+]
+
+[project.scripts]
+manim-mcp = "manim_mcp.cli:cli_main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "moto[s3]>=5.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5",
+    "python-dotenv>=1.0.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
