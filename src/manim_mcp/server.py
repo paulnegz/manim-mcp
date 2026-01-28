@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
@@ -20,7 +21,9 @@ async def app_lifespan(server: FastMCP):
 
 
 def create_server() -> FastMCP:
-    mcp = FastMCP("manim-mcp", lifespan=app_lifespan)
+    host = os.environ.get("MANIM_MCP_SERVER_HOST", "0.0.0.0")
+    port = int(os.environ.get("MANIM_MCP_SERVER_PORT", "8000"))
+    mcp = FastMCP("manim-mcp", lifespan=app_lifespan, host=host, port=port)
     register_all_tools(mcp)
     return mcp
 
