@@ -57,6 +57,11 @@ def register_generate_tools(mcp: FastMCP) -> None:
         logger.info("=" * 60)
 
         app = ctx.request_context.lifespan_context
+
+        async def progress_callback(stage: str, pct: int):
+            """Report progress to keep SSE connection alive."""
+            await ctx.report_progress(pct, 100)
+
         try:
             await ctx.report_progress(0, 100)
             params = RenderParams(
@@ -68,7 +73,9 @@ def register_generate_tools(mcp: FastMCP) -> None:
                 transparent=transparent,
                 save_last_frame=save_last_frame,
             )
-            result = await app.pipeline.generate(prompt=prompt, params=params)
+            result = await app.pipeline.generate(
+                prompt=prompt, params=params, progress_callback=progress_callback
+            )
             await ctx.report_progress(100, 100)
 
             elapsed = time.time() - start_time
@@ -131,6 +138,11 @@ def register_generate_tools(mcp: FastMCP) -> None:
         logger.info("=" * 60)
 
         app = ctx.request_context.lifespan_context
+
+        async def progress_callback(stage: str, pct: int):
+            """Report progress to keep SSE connection alive."""
+            await ctx.report_progress(pct, 100)
+
         try:
             await ctx.report_progress(0, 100)
             params = RenderParams(
@@ -146,6 +158,7 @@ def register_generate_tools(mcp: FastMCP) -> None:
                 render_id=render_id,
                 instructions=instructions,
                 params=params,
+                progress_callback=progress_callback,
             )
             await ctx.report_progress(100, 100)
 
