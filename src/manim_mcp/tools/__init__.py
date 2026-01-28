@@ -11,6 +11,8 @@ if TYPE_CHECKING:
 def register_all_tools(mcp: FastMCP) -> None:
     from manim_mcp.tools.generate import register_generate_tools
     from manim_mcp.tools.manage import register_manage_tools
+    from manim_mcp.tools.rag import register_rag_tools
 
     register_generate_tools(mcp)
     register_manage_tools(mcp)
+    register_rag_tools(mcp)

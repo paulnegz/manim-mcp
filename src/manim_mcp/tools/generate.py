@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import time
+
 from mcp.server.fastmcp import Context, FastMCP
 
 from manim_mcp.core.pipeline import RenderParams
 from manim_mcp.exceptions import ManimMCPError
 from manim_mcp.models import OutputFormat, RenderQuality
+
+logger = logging.getLogger(__name__)
 
 
 def register_generate_tools(mcp: FastMCP) -> None:
@@ -41,6 +46,16 @@ def register_generate_tools(mcp: FastMCP) -> None:
         Returns:
             Animation result with video URL, render ID (for editing), and generated source code.
         """
+        start_time = time.time()
+        prompt_preview = prompt[:100] + "..." if len(prompt) > 100 else prompt
+
+        logger.info("=" * 60)
+        logger.info("GENERATE_ANIMATION TOOL CALLED")
+        logger.info(f"  Prompt: {prompt_preview}")
+        logger.info(f"  Quality: {quality}, Format: {format}")
+        logger.info(f"  Resolution: {resolution}, FPS: {fps}")
+        logger.info("=" * 60)
+
         app = ctx.request_context.lifespan_context
         try:
             await ctx.report_progress(0, 100)
@@ -55,10 +70,22 @@ def register_generate_tools(mcp: FastMCP) -> None:
             )
             result = await app.pipeline.generate(prompt=prompt, params=params)
             await ctx.report_progress(100, 100)
+
+            elapsed = time.time() - start_time
+            logger.info("=" * 60)
+            logger.info(f"GENERATE_ANIMATION SUCCEEDED in {elapsed:.2f}s")
+            logger.info(f"  Render ID: {result.render_id}")
+            logger.info(f"  URL: {result.url}")
+            logger.info("=" * 60)
+
             return result.model_dump()
         except ManimMCPError as e:
+            elapsed = time.time() - start_time
+            logger.error(f"GENERATE_ANIMATION FAILED after {elapsed:.2f}s: {e}")
             return {"error": True, "message": str(e)}
         except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"GENERATE_ANIMATION ERROR after {elapsed:.2f}s: {e}")
             return {"error": True, "message": f"Unexpected error: {e}"}
 
     @mcp.tool()
@@ -93,6 +120,16 @@ def register_generate_tools(mcp: FastMCP) -> None:
         Returns:
             New animation result with updated video URL and new render ID.
         """
+        start_time = time.time()
+        instructions_preview = instructions[:100] + "..." if len(instructions) > 100 else instructions
+
+        logger.info("=" * 60)
+        logger.info("EDIT_ANIMATION TOOL CALLED")
+        logger.info(f"  Render ID: {render_id}")
+        logger.info(f"  Instructions: {instructions_preview}")
+        logger.info(f"  Quality: {quality}, Format: {format}")
+        logger.info("=" * 60)
+
         app = ctx.request_context.lifespan_context
         try:
             await ctx.report_progress(0, 100)
@@ -111,8 +148,20 @@ def register_generate_tools(mcp: FastMCP) -> None:
                 params=params,
             )
             await ctx.report_progress(100, 100)
+
+            elapsed = time.time() - start_time
+            logger.info("=" * 60)
+            logger.info(f"EDIT_ANIMATION SUCCEEDED in {elapsed:.2f}s")
+            logger.info(f"  New Render ID: {result.render_id}")
+            logger.info(f"  URL: {result.url}")
+            logger.info("=" * 60)
+
             return result.model_dump()
         except ManimMCPError as e:
+            elapsed = time.time() - start_time
+            logger.error(f"EDIT_ANIMATION FAILED after {elapsed:.2f}s: {e}")
             return {"error": True, "message": str(e)}
         except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"EDIT_ANIMATION ERROR after {elapsed:.2f}s: {e}")
             return {"error": True, "message": f"Unexpected error: {e}"}

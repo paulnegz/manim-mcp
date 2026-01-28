@@ -11,6 +11,16 @@ services:
     volumes:
       - minio-data:/data
 
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    volumes:
+      - chroma-data:/chroma/chroma
+
   manim-mcp:
     build: .
     ports:
@@ -20,8 +30,13 @@ services:
       MANIM_MCP_S3_ACCESS_KEY: minioadmin
       MANIM_MCP_S3_SECRET_KEY: minioadmin
       MANIM_MCP_GEMINI_API_KEY: ${MANIM_MCP_GEMINI_API_KEY}
+      MANIM_MCP_CHROMADB_HOST: chromadb
+      MANIM_MCP_CHROMADB_PORT: 8000
+      MANIM_MCP_RAG_ENABLED: "true"
     depends_on:
       - minio
+      - chromadb
 
 volumes:
   minio-data:
+  chroma-data:
