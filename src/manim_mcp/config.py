@@ -51,8 +51,40 @@ class ManimMCPConfig(BaseSettings):
     max_code_length: int = 50000
     log_level: str = "INFO"
 
+    # LLM Provider settings
+    llm_provider: str = "gemini"  # gemini or claude
+    llm_max_retries: int = 3
+    llm_timeout: int = 60  # seconds
+
+    # Gemini settings
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
-    gemini_max_retries: int = 3
+
+    # Claude settings
+    claude_api_key: str = ""
+    claude_model: str = "claude-sonnet-4-20250514"
 
     latex_available: bool = False
+
+    # Legacy alias for backwards compatibility
+    @property
+    def gemini_max_retries(self) -> int:
+        return self.llm_max_retries
+
+    # ChromaDB / RAG settings
+    chromadb_host: str = "localhost"
+    chromadb_port: int = 8001
+    rag_enabled: bool = True
+    rag_results_limit: int = 5
+    rag_collection_scenes: str = "manim_scenes"
+    rag_collection_docs: str = "manim_docs"
+    rag_collection_errors: str = "error_patterns"
+
+    # Agent mode: simple (direct LLM) or advanced (multi-agent pipeline)
+    agent_mode: str = "simple"
+
+    # Audio / TTS settings
+    tts_model: str = "gemini-2.5-flash-preview-tts"
+    tts_voice: str = "Kore"  # Clear, professional voice for education
+    tts_pause_ms: int = 400  # Pause between sentences
+    tts_max_concurrent: int = 5  # Max parallel TTS requests

@@ -6,16 +6,18 @@ import logging
 import shutil
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator
 
 from manim_mcp.config import ManimMCPConfig
-from manim_mcp.core.llm import GeminiClient
+from manim_mcp.core.llm import BaseLLMClient, create_llm_client
 from manim_mcp.core.pipeline import AnimationPipeline
+from manim_mcp.core.rag import ChromaDBService
 from manim_mcp.core.renderer import ManimRenderer
 from manim_mcp.core.sandbox import CodeSandbox
 from manim_mcp.core.scene_parser import SceneParser
 from manim_mcp.core.storage import S3Storage
 from manim_mcp.core.tracker import RenderTracker
+from manim_mcp.core.tts import GeminiTTSService
 from manim_mcp.exceptions import ManimNotInstalledError
 
 logger = logging.getLogger(__name__)
@@ -30,7 +32,25 @@ class AppContext:
     tracker: RenderTracker
     sandbox: CodeSandbox
     scene_parser: SceneParser
-    llm: GeminiClient
+    llm: BaseLLMClient
+    rag: ChromaDBService
+
+
+def _check_llm_api_key(config: ManimMCPConfig) -> None:
+    """Validate that the required LLM API key is set."""
+    provider = config.llm_provider.lower()
+    if provider == "claude":
+        if not config.claude_api_key:
+            raise RuntimeError(
+                "MANIM_MCP_CLAUDE_API_KEY must be set when using Claude provider. "
+                "Get an API key at: https://console.anthropic.com/"
+            )
+    else:  # gemini (default)
+        if not config.gemini_api_key:
+            raise RuntimeError(
+                "MANIM_MCP_GEMINI_API_KEY must be set when using Gemini provider. "
+                "Get an API key at: https://ai.google.dev/"
+            )
 
 
 @asynccontextmanager
@@ -50,8 +70,7 @@ async def app_context(config: ManimMCPConfig | None = None) -> AsyncIterator[App
             "Install with: pip install manim"
         )
 
-    if not config.gemini_api_key:
-        raise RuntimeError("MANIM_MCP_GEMINI_API_KEY must be set")
+    _check_llm_api_key(config)
 
     if not shutil.which("ffmpeg"):
         logger.warning("ffmpeg not found on PATH — some renders may fail")
@@ -62,18 +81,40 @@ async def app_context(config: ManimMCPConfig | None = None) -> AsyncIterator[App
     else:
         config.latex_available = True
 
-    # Initialize components
+    # Initialize components with error handling
     storage = S3Storage(config)
     await storage.initialize()
 
     tracker = RenderTracker(config)
     await tracker.initialize()
 
+    rag = ChromaDBService(config)
+    await rag.initialize()
+
     sandbox = CodeSandbox(config)
     scene_parser = SceneParser()
-    llm = GeminiClient(config)
+
+    # Create LLM client based on provider
+    try:
+        llm = create_llm_client(config)
+    except ImportError as e:
+        logger.error("Failed to initialize LLM client: %s", e)
+        raise RuntimeError(f"LLM initialization failed: {e}")
+
     renderer = ManimRenderer(config, scene_parser)
-    pipeline = AnimationPipeline(config, llm, renderer, sandbox, scene_parser, tracker, storage)
+
+    # Initialize TTS service if Gemini API key is available
+    tts = None
+    if config.gemini_api_key:
+        try:
+            tts = GeminiTTSService(config)
+            logger.info("TTS service initialized (voice: %s)", config.tts_voice)
+        except Exception as e:
+            logger.warning("Failed to initialize TTS service: %s", e)
+
+    pipeline = AnimationPipeline(
+        config, llm, renderer, sandbox, scene_parser, tracker, storage, rag, tts
+    )
 
     ctx = AppContext(
         config=config,
@@ -84,13 +125,22 @@ async def app_context(config: ManimMCPConfig | None = None) -> AsyncIterator[App
         sandbox=sandbox,
         scene_parser=scene_parser,
         llm=llm,
+        rag=rag,
+    )
+
+    # Determine which model name to show
+    model_name = (
+        config.claude_model if config.llm_provider == "claude"
+        else config.gemini_model
     )
 
     logger.info(
-        "manim-mcp started (S3: %s, max concurrent: %d, Gemini model: %s)",
+        "manim-mcp started (LLM: %s/%s, S3: %s, RAG: %s, max concurrent: %d)",
+        config.llm_provider,
+        model_name,
         "available" if storage.available else "degraded",
+        "available" if rag.available else "degraded",
         config.max_concurrent_renders,
-        config.gemini_model,
     )
 
     try:

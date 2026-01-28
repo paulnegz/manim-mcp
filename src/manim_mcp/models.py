@@ -149,3 +149,98 @@ class AnimationResult(BaseModel):
     prompt: Optional[str] = None
     source_code: Optional[str] = None
     message: str = ""
+
+
+# ── RAG Models ────────────────────────────────────────────────────────
+
+class RAGResult(BaseModel):
+    """A single result from RAG similarity search."""
+    document_id: str
+    content: str
+    metadata: dict = Field(default_factory=dict)
+    similarity_score: float = 0.0
+
+
+class RAGIndexStatus(BaseModel):
+    """Status of RAG collections."""
+    available: bool = False
+    scenes_count: int = 0
+    docs_count: int = 0
+    errors_count: int = 0
+
+
+# ── Agent Models ──────────────────────────────────────────────────────
+
+class MathDomain(str, Enum):
+    algebra = "algebra"
+    calculus = "calculus"
+    geometry = "geometry"
+    linear_algebra = "linear_algebra"
+    probability = "probability"
+    physics = "physics"
+    general = "general"
+
+
+class Complexity(str, Enum):
+    simple = "simple"
+    moderate = "moderate"
+    complex = "complex"
+
+
+class ConceptAnalysis(BaseModel):
+    """Output of the ConceptAnalyzerAgent."""
+    domain: MathDomain = MathDomain.general
+    complexity: Complexity = Complexity.moderate
+    key_concepts: list[str] = Field(default_factory=list)
+    visual_elements: list[str] = Field(default_factory=list)
+    suggested_duration: int = 15  # seconds
+
+
+class SceneSegment(BaseModel):
+    """A segment of the animation scene plan."""
+    name: str
+    description: str
+    duration: float  # seconds
+    mobjects: list[str] = Field(default_factory=list)
+    animations: list[str] = Field(default_factory=list)
+
+
+class ScenePlan(BaseModel):
+    """Output of the ScenePlannerAgent."""
+    title: str
+    segments: list[SceneSegment] = Field(default_factory=list)
+    total_duration: float = 0.0
+    rag_examples: list[str] = Field(default_factory=list)  # IDs of relevant examples
+
+
+class CodeReviewResult(BaseModel):
+    """Output of the CodeReviewerAgent."""
+    approved: bool = False
+    issues: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    fixed_code: Optional[str] = None
+
+
+class AgentPipelineResult(BaseModel):
+    """Complete result of the multi-agent pipeline."""
+    concept_analysis: Optional[ConceptAnalysis] = None
+    scene_plan: Optional[ScenePlan] = None
+    generated_code: str = ""
+    review_result: Optional[CodeReviewResult] = None
+    rag_context_used: bool = False
+
+
+# ── Audio / TTS Models ─────────────────────────────────────────────────
+
+class AudioSegment(BaseModel):
+    """A single audio segment from TTS generation."""
+    index: int
+    text: str
+    audio_data: Optional[bytes] = None
+    duration_ms: int = 0
+
+
+class NarrationScript(BaseModel):
+    """A narration script split into sentences."""
+    sentences: list[str] = Field(default_factory=list)
+    total_duration_estimate: float = 0.0
