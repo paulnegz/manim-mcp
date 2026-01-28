@@ -44,10 +44,14 @@ async def cmd_generate(
     printer: Printer,
 ) -> int:
     params = _params_from_args(args)
-    printer.info(f"Generating animation: {args.prompt}")
+    mode = getattr(args, "mode", "simple")
+    printer.info(f"Generating animation ({mode} mode): {args.prompt}")
 
     with spinner("Generating animation"):
-        result = await ctx.pipeline.generate(prompt=args.prompt, params=params)
+        if mode == "advanced":
+            result = await ctx.pipeline.generate_advanced(prompt=args.prompt, params=params)
+        else:
+            result = await ctx.pipeline.generate(prompt=args.prompt, params=params)
 
     printer.animation_result(result.model_dump())
     return 0
@@ -149,6 +153,15 @@ async def cmd_prompt(
     )
 
 
+async def cmd_index(
+    args: argparse.Namespace,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    from manim_mcp.cli.indexer import cmd_index as indexer_cmd
+    return await indexer_cmd(args, ctx, printer)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _params_from_args(args: argparse.Namespace) -> RenderParams:
@@ -160,6 +173,8 @@ def _params_from_args(args: argparse.Namespace) -> RenderParams:
         background_color=getattr(args, "background_color", None),
         transparent=getattr(args, "transparent", False),
         save_last_frame=getattr(args, "save_last_frame", False),
+        audio=getattr(args, "audio", False),
+        voice=getattr(args, "voice", None),
     )
 
 
@@ -173,4 +188,5 @@ _HANDLERS = {
     "delete": cmd_delete,
     "rm": cmd_delete,
     "prompt": cmd_prompt,
+    "index": cmd_index,
 }
