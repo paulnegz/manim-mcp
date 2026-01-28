@@ -9,7 +9,10 @@ import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Awaitable
+
+# Type alias for progress callback: async fn(stage: str, percent: int) -> None
+ProgressCallback = Callable[[str, int], Awaitable[None]]
 
 from manim_mcp.exceptions import CodeValidationError, ManimMCPError
 from manim_mcp.models import (
@@ -82,39 +85,57 @@ class AnimationPipeline:
             self._orchestrator = AgentOrchestrator(self.llm, self.rag, self.config)
         return self._orchestrator
 
-    async def generate(self, prompt: str, params: RenderParams | None = None) -> AnimationResult:
+    async def generate(
+        self,
+        prompt: str,
+        params: RenderParams | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> AnimationResult:
         params = params or RenderParams()
         render_id = uuid.uuid4().hex[:12]
         await self.tracker.create_render(
             render_id, quality=params.quality.value, fmt=params.fmt.value, original_prompt=prompt,
         )
 
-        try:
-            # 1. Generate code via Gemini
-            await self.tracker.update_render(render_id, status=RenderStatus.generating)
-            code = await self._generate_and_validate(prompt)
+        async def report(stage: str, pct: int):
+            if progress_callback:
+                await progress_callback(stage, pct)
 
-            # 2. Store generated code
+        try:
+            # 1. Generate code via Gemini (0-20%)
+            await report("generating", 5)
+            await self.tracker.update_render(render_id, status=RenderStatus.generating)
+            await report("generating", 10)
+            code = await self._generate_and_validate(prompt)
+            await report("validating", 20)
+
+            # 2. Store generated code (20-25%)
             scenes = self.scene_parser.parse_scenes(code)
             scene_name = scenes[0].name if scenes else None
             await self.tracker.update_render(
                 render_id, source_code=code, scene_name=scene_name,
             )
+            await report("preparing", 25)
 
-            # 3. Render + upload
+            # 3. Render + upload (25-60%)
+            await report("rendering", 30)
             result = await self._render_and_upload(render_id, code, scene_name, params)
+            await report("uploading", 60)
 
-            # 4. Generate audio narration if requested
+            # 4. Generate audio narration if requested (60-90%)
             has_audio = False
             if params.audio and result.local_path:
                 try:
+                    await report("generating_audio", 65)
                     audio_path = await self._generate_audio(prompt, render_id, params.voice)
+                    await report("mixing_audio", 80)
                     if audio_path:
                         mixed_path = await self._mix_audio_video(
                             result.local_path, audio_path
                         )
                         result.local_path = mixed_path
                         has_audio = True
+                        await report("uploading_audio", 85)
 
                         # Re-upload the audio-mixed video to S3
                         if self.storage.available:
@@ -130,6 +151,8 @@ class AnimationPipeline:
                                 logger.warning("Failed to upload audio-mixed video: %s", e)
                 except Exception as e:
                     logger.warning("Audio generation failed, continuing without audio: %s", e)
+
+            await report("finalizing", 95)
 
             # Self-index successful render for RAG
             await self._on_successful_render(code, prompt, render_id)
@@ -163,6 +186,7 @@ class AnimationPipeline:
         self,
         prompt: str,
         params: RenderParams | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> AnimationResult:
         """Multi-agent generation with RAG context.
 
@@ -177,6 +201,7 @@ class AnimationPipeline:
         Args:
             prompt: Text description of the animation
             params: Render parameters (quality, format, etc.)
+            progress_callback: Optional callback for progress updates
 
         Returns:
             AnimationResult with render details
@@ -190,14 +215,22 @@ class AnimationPipeline:
             original_prompt=prompt,
         )
 
+        async def report(stage: str, pct: int):
+            if progress_callback:
+                await progress_callback(stage, pct)
+
         try:
-            # 1. Run multi-agent pipeline
+            # 1. Run multi-agent pipeline (0-20%)
+            await report("analyzing", 5)
             await self.tracker.update_render(render_id, status=RenderStatus.generating)
+            await report("planning", 10)
             pipeline_result = await self.orchestrator.generate_advanced(prompt)
             code = pipeline_result.generated_code
+            await report("generating", 15)
 
             # 2. Validate with sandbox (agents may have pre-validated)
             code = await self._validate_with_retries(code)
+            await report("validating", 20)
 
             # 3. Store generated code
             scenes = self.scene_parser.parse_scenes(code)
@@ -205,21 +238,27 @@ class AnimationPipeline:
             await self.tracker.update_render(
                 render_id, source_code=code, scene_name=scene_name,
             )
+            await report("preparing", 25)
 
-            # 4. Render + upload
+            # 4. Render + upload (25-60%)
+            await report("rendering", 30)
             result = await self._render_and_upload(render_id, code, scene_name, params)
+            await report("uploading", 60)
 
-            # 5. Generate audio narration if requested
+            # 5. Generate audio narration if requested (60-90%)
             has_audio = False
             if params.audio and result.local_path:
                 try:
+                    await report("generating_audio", 65)
                     audio_path = await self._generate_audio(prompt, render_id, params.voice)
+                    await report("mixing_audio", 80)
                     if audio_path:
                         mixed_path = await self._mix_audio_video(
                             result.local_path, audio_path
                         )
                         result.local_path = mixed_path
                         has_audio = True
+                        await report("uploading_audio", 85)
 
                         # Re-upload the audio-mixed video to S3
                         if self.storage.available:
@@ -235,6 +274,8 @@ class AnimationPipeline:
                                 logger.warning("Failed to upload audio-mixed video: %s", e)
                 except Exception as e:
                     logger.warning("Audio generation failed, continuing without audio: %s", e)
+
+            await report("finalizing", 95)
 
             # Self-index successful render
             await self._on_successful_render(code, prompt, render_id)
@@ -269,10 +310,16 @@ class AnimationPipeline:
         render_id: str,
         instructions: str,
         params: RenderParams | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> AnimationResult:
         params = params or RenderParams()
 
+        async def report(stage: str, pct: int):
+            if progress_callback:
+                await progress_callback(stage, pct)
+
         # 1. Get original render
+        await report("loading", 5)
         original = await self.tracker.get_render(render_id)
         if not original.source_code:
             raise ManimMCPError(f"Render '{render_id}' has no source code to edit")
@@ -287,11 +334,14 @@ class AnimationPipeline:
             original_prompt=original.original_prompt,
             edit_instructions=instructions,
         )
+        await report("preparing", 10)
 
         try:
-            # 3. Edit code via Gemini
+            # 3. Edit code via Gemini (10-30%)
+            await report("editing", 15)
             await self.tracker.update_render(new_id, status=RenderStatus.generating)
             edited_code = await self._edit_and_validate(original.source_code, instructions)
+            await report("validating", 30)
 
             # 4. Store edited code
             scenes = self.scene_parser.parse_scenes(edited_code)
@@ -299,9 +349,14 @@ class AnimationPipeline:
             await self.tracker.update_render(
                 new_id, source_code=edited_code, scene_name=scene_name,
             )
+            await report("storing", 35)
 
-            # 5. Render + upload
+            # 5. Render + upload (35-90%)
+            await report("rendering", 40)
             result = await self._render_and_upload(new_id, edited_code, scene_name, params)
+            await report("uploading", 90)
+
+            await report("finalizing", 95)
 
             return AnimationResult(
                 render_id=new_id,
