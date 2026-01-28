@@ -89,8 +89,10 @@ def cli_main() -> None:
 
     # serve is special — it hands off to the MCP server
     if args.command == "serve":
+        import os
         from manim_mcp.server import create_server
         server = create_server()
+        # FastMCP uses UVICORN_HOST/UVICORN_PORT env vars (set in docker-compose)
         server.run(transport=args.transport)
         return
 
