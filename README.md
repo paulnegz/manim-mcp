@@ -4,6 +4,13 @@ Text-to-video animation powered by [manimgl](https://github.com/3b1b/manim) (3Bl
 
 Works as a **CLI tool**, an **LLM-powered agent**, or an **MCP server** for integration with AI assistants like Claude.
 
+## Examples
+
+| Circle to Square Transform | 3D Rotating Cube |
+|---------------------------|------------------|
+| `manim-mcp gen "Transform a blue circle into a red square"` | `manim-mcp gen "A 3D cube rotating. Use ThreeDScene."` |
+| ![Circle to Square](assets/circle_to_square.gif) | ![Rotating Cube](assets/rotating_cube_preview.gif) |
+
 ## Features
 
 - **RAG-powered code generation** - Uses 3,100+ indexed 3Blue1Brown scenes for high-quality examples
