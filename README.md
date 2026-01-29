@@ -6,9 +6,9 @@ Works as a **CLI tool**, a **Gemini-powered agent**, or an **MCP server** for in
 
 ## Examples
 
-| Circle to Square Transform | Rotating Cube |
-|---------------------------|---------------|
-| `manim-mcp gen "Transform a blue circle into a red square"` | `manim-mcp gen "Draw a rotating cube" -q high -f gif` |
+| Circle to Square Transform | 3D Rotating Cube |
+|---------------------------|------------------|
+| `manim-mcp gen "Transform a blue circle into a red square"` | `manim-mcp gen "A 3D cube rotating. Use ThreeDScene."` |
 | ![Circle to Square](assets/circle_to_square.gif) | ![Rotating Cube](assets/rotating_cube_preview.gif) |
 
 ## Quick Start
