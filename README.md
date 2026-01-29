@@ -126,14 +126,58 @@ When running as an MCP server, the following tools are available:
 ## Architecture
 
 ```
-prompt → Gemini LLM → Python code → AST validation → Manim render → S3 upload → URL
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              manim-mcp                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   ┌─────────┐     ┌─────────┐     ┌─────────────┐                          │
+│   │   CLI   │     │  Agent  │     │  MCP Server │                          │
+│   └────┬────┘     └────┬────┘     └──────┬──────┘                          │
+│        │               │                 │                                  │
+│        └───────────────┴─────────────────┘                                  │
+│                        │                                                    │
+│                        ▼                                                    │
+│              ┌─────────────────┐         ┌──────────────┐                  │
+│              │ AnimationPipeline│◄───────│  ChromaDB    │                  │
+│              └────────┬────────┘   RAG   │  (optional)  │                  │
+│                       │                  └──────────────┘                  │
+│        ┌──────────────┼──────────────┐                                     │
+│        ▼              ▼              ▼                                     │
+│   ┌─────────┐   ┌───────────┐   ┌─────────┐                               │
+│   │ Gemini/ │   │  Code     │   │  Manim  │                               │
+│   │ Claude  │   │  Sandbox  │   │ Renderer│                               │
+│   │   LLM   │   │  (AST)    │   │         │                               │
+│   └─────────┘   └───────────┘   └────┬────┘                               │
+│        │                             │                                     │
+│        │    ┌────────────────────────┤                                     │
+│        ▼    ▼                        ▼                                     │
+│   ┌─────────────┐              ┌───────────┐                              │
+│   │ Gemini TTS  │              │ S3/MinIO  │                              │
+│   │  (--audio)  │              │  Storage  │                              │
+│   └──────┬──────┘              └─────┬─────┘                              │
+│          │                           │                                     │
+│          └───────────┬───────────────┘                                     │
+│                      ▼                                                     │
+│               ┌─────────────┐                                              │
+│               │   Video +   │                                              │
+│               │ Audio (URL) │                                              │
+│               └─────────────┘                                              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **GeminiClient** generates Manim Scene code from text prompts
-- **CodeSandbox** validates code via AST analysis (blocks dangerous imports/builtins)
-- **ManimRenderer** executes manim in isolated temp directories with concurrency control
-- **S3Storage** uploads to MinIO/S3 with presigned URLs
-- **RenderTracker** persists job metadata in SQLite
+**Components:**
+
+| Component | Description |
+|-----------|-------------|
+| **AnimationPipeline** | Orchestrates the full generation flow |
+| **LLM (Gemini/Claude)** | Generates Manim Python code from prompts |
+| **CodeSandbox** | Validates code via AST (blocks dangerous imports) |
+| **ManimRenderer** | Executes manim in isolated temp directories |
+| **Gemini TTS** | Generates audio narration (optional `--audio`) |
+| **S3Storage** | Uploads renders to MinIO/S3 with presigned URLs |
+| **ChromaDB** | RAG for few-shot examples (optional, advanced mode) |
+| **RenderTracker** | Persists job metadata in SQLite |
 
 ## Development
 
