@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,14 @@ if TYPE_CHECKING:
     from manim_mcp.core.rag import ChromaDBService
 
 logger = logging.getLogger(__name__)
+
+# Per-agent timeout configuration (seconds)
+AGENT_TIMEOUTS = {
+    "concept_analyzer": 30,   # Quick analysis
+    "scene_planner": 45,      # May need RAG lookups
+    "code_generator": 90,     # LLM generation + RAG
+    "code_reviewer": 45,      # Static + LLM review
+}
 
 
 class AgentOrchestrator:
@@ -65,28 +74,31 @@ class AgentOrchestrator:
 
         result = AgentPipelineResult()
 
-        # 1. Concept Analysis
+        # 1. Concept Analysis (with timeout)
         logger.debug("Step 1: Concept analysis")
         try:
-            result.concept_analysis = await self.concept_analyzer.process(prompt)
+            async with asyncio.timeout(AGENT_TIMEOUTS["concept_analyzer"]):
+                result.concept_analysis = await self.concept_analyzer.process(prompt)
             logger.debug(
                 "Analyzed: domain=%s, complexity=%s, concepts=%s",
                 result.concept_analysis.domain.value,
                 result.concept_analysis.complexity.value,
                 result.concept_analysis.key_concepts,
             )
+        except asyncio.TimeoutError:
+            logger.warning("Concept analysis timed out after %ds", AGENT_TIMEOUTS["concept_analyzer"])
+            await self._store_agent_error("concept_analysis", "timeout", prompt=prompt)
         except Exception as e:
             logger.warning("Concept analysis failed: %s", e)
-            # Store error for learning
             await self._store_agent_error("concept_analysis", str(e), prompt=prompt)
-            # Continue without analysis
 
-        # 2. Scene Planning
+        # 2. Scene Planning (with timeout)
         logger.debug("Step 2: Scene planning")
         try:
             analysis = result.concept_analysis
             if analysis:
-                result.scene_plan = await self.scene_planner.process(prompt, analysis)
+                async with asyncio.timeout(AGENT_TIMEOUTS["scene_planner"]):
+                    result.scene_plan = await self.scene_planner.process(prompt, analysis)
                 result.rag_context_used = bool(result.scene_plan.rag_examples)
                 logger.debug(
                     "Planned: %s (%d segments, %.1fs)",
@@ -94,43 +106,50 @@ class AgentOrchestrator:
                     len(result.scene_plan.segments),
                     result.scene_plan.total_duration,
                 )
+        except asyncio.TimeoutError:
+            logger.warning("Scene planning timed out after %ds", AGENT_TIMEOUTS["scene_planner"])
+            await self._store_agent_error("scene_planning", "timeout", prompt=prompt)
         except Exception as e:
             logger.warning("Scene planning failed: %s", e)
-            # Store error for learning
             await self._store_agent_error("scene_planning", str(e), prompt=prompt)
-            # Continue without plan
 
-        # 3. Code Generation
+        # 3. Code Generation (with timeout)
         logger.debug("Step 3: Code generation")
         try:
             if result.concept_analysis and result.scene_plan:
-                generated_code, template_code = await self.code_generator.process(
-                    prompt,
-                    result.concept_analysis,
-                    result.scene_plan,
-                )
+                async with asyncio.timeout(AGENT_TIMEOUTS["code_generator"]):
+                    generated_code, template_code = await self.code_generator.process(
+                        prompt,
+                        result.concept_analysis,
+                        result.scene_plan,
+                    )
                 result.generated_code = generated_code
                 result.original_template_code = template_code
             else:
                 # Fallback to simple generation
                 logger.info("Falling back to simple generation (no plan)")
-                result.generated_code = await self.llm.generate_code(prompt)
+                async with asyncio.timeout(AGENT_TIMEOUTS["code_generator"]):
+                    result.generated_code = await self.llm.generate_code(prompt)
+        except asyncio.TimeoutError:
+            logger.error("Code generation timed out after %ds", AGENT_TIMEOUTS["code_generator"])
+            await self._store_agent_error("code_generation", "timeout", prompt=prompt)
+            raise
         except Exception as e:
             logger.error("Code generation failed: %s", e)
-            # Store error for learning
             await self._store_agent_error("code_generation", str(e), prompt=prompt)
             raise
 
-        # 4. Code Review (with iteration)
+        # 4. Code Review (with timeout and iteration)
         logger.debug("Step 4: Code review")
         code = result.generated_code
         for iteration in range(max_review_iterations):
             try:
-                review = await self.code_reviewer.process(
-                    code,
-                    result.scene_plan,
-                    original_template=result.original_template_code,
-                )
+                async with asyncio.timeout(AGENT_TIMEOUTS["code_reviewer"]):
+                    review = await self.code_reviewer.process(
+                        code,
+                        result.scene_plan,
+                        original_template=result.original_template_code,
+                    )
                 result.review_result = review
 
                 if review.approved:
@@ -152,9 +171,13 @@ class AgentOrchestrator:
                     )
                     break
 
+            except asyncio.TimeoutError:
+                logger.warning("Code review timed out after %ds (iteration %d)",
+                              AGENT_TIMEOUTS["code_reviewer"], iteration + 1)
+                await self._store_agent_error("code_review", "timeout", prompt=prompt, code=code)
+                break
             except Exception as e:
                 logger.warning("Code review failed: %s", e)
-                # Store error for learning
                 await self._store_agent_error("code_review", str(e), prompt=prompt, code=code)
                 break
 
