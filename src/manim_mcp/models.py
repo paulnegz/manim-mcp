@@ -193,7 +193,7 @@ class ConceptAnalysis(BaseModel):
     complexity: Complexity = Complexity.moderate
     key_concepts: list[str] = Field(default_factory=list)
     visual_elements: list[str] = Field(default_factory=list)
-    suggested_duration: int = 15  # seconds
+    suggested_duration: int = 30  # seconds - target 30+ for educational depth
 
 
 class SceneSegment(BaseModel):

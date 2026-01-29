@@ -74,11 +74,14 @@ class ManimMCPConfig(BaseSettings):
     # ChromaDB / RAG settings
     chromadb_host: str = "localhost"
     chromadb_port: int = 8001
+    chromadb_path: str | None = None  # If set, use local persistent DB instead of HTTP
     rag_enabled: bool = True
     rag_results_limit: int = 5
     rag_collection_scenes: str = "manim_scenes"
     rag_collection_docs: str = "manim_docs"
     rag_collection_errors: str = "error_patterns"
+    rag_collection_api: str = "manim_api"
+    rag_collection_patterns: str = "animation_patterns"
 
     # Enhanced RAG settings (Anthropic Contextual Retrieval approach)
     rag_use_enhanced: bool = True  # Use enhanced RAG with hybrid search

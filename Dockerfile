@@ -1,27 +1,50 @@
 FROM python:3.11-slim
 
 # Install system dependencies for manimgl (cached layer)
+# LaTeX packages required by manimgl tex_templates.yml:
+# - Default template: babel, inputenc, fontenc, amsmath, amssymb, dsfont,
+#   setspace, tipa, relsize, textcomp, mathrsfs, calligra, wasysym,
+#   ragged2e, physics, xcolor, microtype, pifont
+# - Additional templates may need: fourier, txfonts, pxfonts, mathastext, etc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build tools
     git \
     gcc \
     g++ \
     build-essential \
+    # FFmpeg for video encoding
     ffmpeg \
+    # Cairo/Pango for graphics
     libcairo2-dev \
     libpango1.0-dev \
     pkg-config \
     python3-dev \
+    # === LaTeX packages (comprehensive for manimgl) ===
     texlive-latex-base \
     texlive-latex-extra \
+    texlive-latex-recommended \
     texlive-fonts-recommended \
+    texlive-fonts-extra \
+    texlive-science \
+    texlive-plain-generic \
+    texlive-pstricks \
+    # Specific packages manimgl needs
+    tipa \
+    cm-super \
+    lmodern \
+    # DVI to SVG/PNG conversion (required by manimgl)
+    dvisvgm \
     dvipng \
+    # === OpenGL dependencies ===
     libgl1-mesa-dev \
     libgles2-mesa-dev \
     libegl1-mesa-dev \
     libglfw3-dev \
     libglfw3 \
+    # Headless rendering
     xvfb \
     xauth \
+    # Other
     curl \
     && rm -rf /var/lib/apt/lists/*
 

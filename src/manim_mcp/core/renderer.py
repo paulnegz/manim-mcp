@@ -33,21 +33,22 @@ logger = logging.getLogger(__name__)
 def prepare_code_for_manimgl(code: str) -> str:
     """Prepare code to run with manimgl (3b1b's library).
 
-    Normalizes imports to use standard manimgl import.
+    Uses the code bridge to transform any Manim CE patterns to manimgl,
+    then normalizes imports.
     """
-    # Normalize all import variants to standard manimgl
+    from manim_mcp.core.code_bridge import bridge_code
+
+    # Use the comprehensive code bridge for CE → manimgl transformation
+    code = bridge_code(code)
+
+    # Additional import normalization for 3b1b-specific patterns
     replacements = [
         (r'from manim_imports_ext import \*', 'from manimlib import *'),
         (r'from big_ol_pile_of_manim_imports import \*', 'from manimlib import *'),
-        (r'from manim import \*', 'from manimlib import *'),  # Convert community to manimgl
     ]
 
     for pattern, replacement in replacements:
         code = re.sub(pattern, replacement, code)
-
-    # Ensure we have an import
-    if 'from manimlib' not in code:
-        code = 'from manimlib import *\n' + code
 
     return code
 
@@ -205,17 +206,31 @@ class ManimRenderer:
             "fourk": "-h",  # same
         }
 
-        cmd = [
-            "xvfb-run",  # Virtual framebuffer for headless rendering
-            "-a",  # Auto-select display number
-            "--server-args=-screen 0 1920x1080x24",  # Virtual screen resolution
-            "manimgl",
-            scene_file,
-            scene_name,
-            "-w",  # Write to file (required for headless)
-            "--video_dir", os.path.join(tmp_dir, "media"),  # Output directory
-            quality_flags.get(input.quality.value, "-m"),
-        ]
+        import sys
+
+        # On Mac (darwin), we don't need xvfb - it has a display
+        # On Linux, use xvfb-run for headless rendering
+        if sys.platform == "darwin":
+            cmd = [
+                "manimgl",
+                scene_file,
+                scene_name,
+                "-w",  # Write to file
+                "--video_dir", os.path.join(tmp_dir, "media"),
+                quality_flags.get(input.quality.value, "-m"),
+            ]
+        else:
+            cmd = [
+                "xvfb-run",  # Virtual framebuffer for headless rendering
+                "-a",  # Auto-select display number
+                "--server-args=-screen 0 1920x1080x24",  # Virtual screen resolution
+                "manimgl",
+                scene_file,
+                scene_name,
+                "-w",  # Write to file (required for headless)
+                "--video_dir", os.path.join(tmp_dir, "media"),  # Output directory
+                quality_flags.get(input.quality.value, "-m"),
+            ]
 
         # Resolution override
         if input.resolution:

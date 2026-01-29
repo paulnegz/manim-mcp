@@ -26,25 +26,55 @@ class ChromaDBService:
         self._scenes_collection = None
         self._docs_collection = None
         self._errors_collection = None
+        self._api_collection = None
+        self._patterns_collection = None
 
     async def initialize(self) -> None:
-        """Initialize ChromaDB connection with graceful degradation."""
+        """Initialize ChromaDB connection with graceful degradation.
+
+        Supports two modes:
+        1. HTTP client: connects to a ChromaDB server (chromadb_host:chromadb_port)
+        2. Persistent client: uses local storage (chromadb_path)
+
+        Falls back to persistent mode if HTTP fails or chromadb_path is set.
+        """
         if not self.config.rag_enabled:
             logger.info("RAG disabled via configuration")
             return
 
         try:
-            import chromadb
-            from chromadb.config import Settings
+            import os
+            import warnings
 
-            self._client = chromadb.HttpClient(
-                host=self.config.chromadb_host,
-                port=self.config.chromadb_port,
-                settings=Settings(anonymized_telemetry=False),
-            )
+            # Suppress pydantic v1 warnings for Python 3.14+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*Pydantic V1.*")
+                import chromadb
 
-            # Test connection by getting heartbeat
-            self._client.heartbeat()
+            # Priority: 1) local data/chromadb, 2) explicit path, 3) HTTP server
+            local_db_path = self.config.chromadb_path or os.path.join(os.getcwd(), "data", "chromadb")
+
+            if os.path.exists(local_db_path):
+                # Use local persistent DB
+                try:
+                    self._client = chromadb.PersistentClient(path=local_db_path)
+                    logger.info("ChromaDB using local DB: %s", local_db_path)
+                except Exception as local_err:
+                    logger.warning("PersistentClient failed: %s, trying HTTP", local_err)
+                    self._client = chromadb.HttpClient(
+                        host=self.config.chromadb_host,
+                        port=self.config.chromadb_port,
+                    )
+                    self._client.heartbeat()
+            else:
+                # Try HTTP client
+                self._client = chromadb.HttpClient(
+                    host=self.config.chromadb_host,
+                    port=self.config.chromadb_port,
+                )
+                self._client.heartbeat()
+                logger.info("ChromaDB HTTP connected: %s:%d",
+                           self.config.chromadb_host, self.config.chromadb_port)
 
             # Get or create collections
             self._scenes_collection = self._client.get_or_create_collection(
@@ -59,15 +89,23 @@ class ChromaDBService:
                 name=self.config.rag_collection_errors,
                 metadata={"description": "Error patterns and fixes"},
             )
+            self._api_collection = self._client.get_or_create_collection(
+                name=self.config.rag_collection_api,
+                metadata={"description": "Manimgl API signatures and parameters"},
+            )
+            self._patterns_collection = self._client.get_or_create_collection(
+                name=self.config.rag_collection_patterns,
+                metadata={"description": "3b1b animation patterns and templates"},
+            )
 
             self.available = True
             logger.info(
-                "ChromaDB connected: %s:%d (scenes=%d, docs=%d, errors=%d)",
-                self.config.chromadb_host,
-                self.config.chromadb_port,
+                "ChromaDB ready (scenes=%d, docs=%d, errors=%d, api=%d, patterns=%d)",
                 self._scenes_collection.count(),
                 self._docs_collection.count(),
                 self._errors_collection.count(),
+                self._api_collection.count(),
+                self._patterns_collection.count(),
             )
 
         except ImportError:
@@ -186,6 +224,165 @@ class ChromaDBService:
         except Exception as e:
             logger.warning("Failed to index error pattern: %s", e)
             return None
+
+    async def index_api_signature(
+        self,
+        signature_doc: str,
+        metadata: dict | None = None,
+    ) -> str | None:
+        """Index a manimgl API signature for parameter validation.
+
+        Args:
+            signature_doc: Document describing the API (signature, params, docstring)
+            metadata: Metadata including full_name, class_name, parameters, etc.
+
+        Returns:
+            Document ID if indexed, None if RAG unavailable
+        """
+        if not self.available or not self._api_collection:
+            return None
+
+        try:
+            meta = metadata or {}
+            doc_id = meta.get("id") or self._hash_content(signature_doc)
+
+            self._api_collection.upsert(
+                ids=[doc_id],
+                documents=[signature_doc],
+                metadatas=[meta],
+            )
+            logger.debug("Indexed API signature: %s", doc_id)
+            return doc_id
+
+        except Exception as e:
+            logger.warning("Failed to index API signature: %s", e)
+            return None
+
+    async def search_api_signatures(
+        self,
+        query: str,
+        n_results: int = 5,
+    ) -> list[dict]:
+        """Search for API signatures matching a query.
+
+        Args:
+            query: Method name, class name, or description
+            n_results: Number of results to return
+
+        Returns:
+            List of matching API signatures with metadata
+        """
+        if not self.available or not self._api_collection:
+            return []
+
+        try:
+            results = self._api_collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"],
+            )
+
+            return self._format_results(results)
+
+        except Exception as e:
+            logger.warning("API signature search failed: %s", e)
+            return []
+
+    async def get_api_signature(
+        self,
+        full_name: str,
+    ) -> dict | None:
+        """Get a specific API signature by its full name (e.g., 'Axes.get_riemann_rectangles').
+
+        Args:
+            full_name: Fully qualified name like 'ClassName.method_name'
+
+        Returns:
+            API signature dict or None if not found
+        """
+        if not self.available or not self._api_collection:
+            return None
+
+        try:
+            results = self._api_collection.get(
+                ids=[full_name],
+                include=["documents", "metadatas"],
+            )
+
+            if results and results.get("ids"):
+                return {
+                    "document_id": results["ids"][0],
+                    "content": results["documents"][0] if results.get("documents") else "",
+                    "metadata": results["metadatas"][0] if results.get("metadatas") else {},
+                }
+            return None
+
+        except Exception as e:
+            logger.warning("API signature lookup failed for %s: %s", full_name, e)
+            return None
+
+    async def index_animation_pattern(
+        self,
+        pattern_doc: str,
+        metadata: dict | None = None,
+    ) -> str | None:
+        """Index a 3b1b animation pattern for code generation guidance.
+
+        Args:
+            pattern_doc: Document describing the pattern (name, code template, etc.)
+            metadata: Metadata including name, category, math_concepts, keywords
+
+        Returns:
+            Document ID if indexed, None if RAG unavailable
+        """
+        if not self.available or not self._patterns_collection:
+            return None
+
+        try:
+            meta = metadata or {}
+            doc_id = meta.get("id") or self._hash_content(pattern_doc)
+
+            self._patterns_collection.upsert(
+                ids=[doc_id],
+                documents=[pattern_doc],
+                metadatas=[meta],
+            )
+            logger.debug("Indexed animation pattern: %s", doc_id)
+            return doc_id
+
+        except Exception as e:
+            logger.warning("Failed to index animation pattern: %s", e)
+            return None
+
+    async def search_animation_patterns(
+        self,
+        query: str,
+        n_results: int = 3,
+    ) -> list[dict]:
+        """Search for animation patterns matching a query.
+
+        Args:
+            query: Math concept, animation type, or description
+            n_results: Number of results to return
+
+        Returns:
+            List of matching patterns with metadata and code templates
+        """
+        if not self.available or not self._patterns_collection:
+            return []
+
+        try:
+            results = self._patterns_collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"],
+            )
+
+            return self._format_results(results)
+
+        except Exception as e:
+            logger.warning("Animation pattern search failed: %s", e)
+            return []
 
     async def search_similar_scenes(
         self,
@@ -334,14 +531,16 @@ class ChromaDBService:
         code: str,
         fix: str | None = None,
         prompt: str | None = None,
+        transformed_code: str | None = None,
     ) -> bool:
         """Store an error pattern for future learning.
 
         Args:
             error_message: The error message that occurred
-            code: The code that caused the error
+            code: The original code (what LLM generated)
             fix: The fixed code (if available)
             prompt: The original prompt (for context)
+            transformed_code: The code after bridge transformation (what actually ran)
 
         Returns:
             True if stored successfully
@@ -355,15 +554,32 @@ class ChromaDBService:
             content_hash = hashlib.sha256(f"{error_message}{code[:500]}".encode()).hexdigest()[:16]
             doc_id = f"err_{content_hash}"
 
-            # Format document for retrieval
+            # Parse error reason from message
+            error_reason = self._parse_error_reason(error_message)
+
+            # Format document for retrieval with both original and transformed code
+            parts = [
+                f"ERROR: {error_message}",
+                f"\nREASON: {error_reason}",
+                f"\nORIGINAL_CODE (what LLM generated):\n```python\n{code[:2000]}\n```",
+            ]
+
+            if transformed_code and transformed_code != code:
+                parts.append(
+                    f"\nTRANSFORMED_CODE (what actually ran after CE→manimgl bridge):\n"
+                    f"```python\n{transformed_code[:2000]}\n```"
+                )
+
             if fix:
-                document = f"ERROR: {error_message}\n\nCODE:\n{code[:2000]}\n\nFIX:\n{fix[:2000]}"
-            else:
-                document = f"ERROR: {error_message}\n\nCODE:\n{code[:2000]}"
+                parts.append(f"\nFIX:\n```python\n{fix[:2000]}\n```")
+
+            document = "\n".join(parts)
 
             metadata = {
-                "error_type": error_message.split(":")[0] if ":" in error_message else "Unknown",
+                "error_type": self._classify_error(error_message),
+                "error_reason": error_reason[:200],
                 "has_fix": fix is not None,
+                "has_transformed": transformed_code is not None,
                 "code_length": len(code),
                 "prompt": (prompt or "")[:200],
             }
@@ -374,13 +590,46 @@ class ChromaDBService:
                 metadatas=[metadata],
             )
 
-            logger.info("[RAG] Stored error pattern: %s (has_fix=%s)",
-                       error_message[:50], fix is not None)
+            logger.info("[RAG] Stored error pattern: %s (reason=%s, has_fix=%s)",
+                       error_message[:50], error_reason[:30], fix is not None)
             return True
 
         except Exception as e:
             logger.warning("Failed to store error pattern: %s", e)
             return False
+
+    def _parse_error_reason(self, error_message: str) -> str:
+        """Extract a human-readable reason from error message."""
+        import re
+
+        # Common patterns
+        patterns = [
+            (r"AttributeError: '(\w+)' object has no attribute '(\w+)'",
+             lambda m: f"{m.group(1)} doesn't have method/attribute '{m.group(2)}' in manimgl"),
+            (r"TypeError: .*unexpected keyword argument '(\w+)'",
+             lambda m: f"Parameter '{m.group(1)}' doesn't exist in manimgl"),
+            (r"ImportError: cannot import name '(\w+)'",
+             lambda m: f"'{m.group(1)}' doesn't exist in manimgl"),
+            (r"NameError: name '(\w+)' is not defined",
+             lambda m: f"'{m.group(1)}' is not defined - might be CE-only"),
+            (r"FileNotFoundError:.*'(\w+)'",
+             lambda m: f"Missing dependency: '{m.group(1)}' not installed"),
+            (r"SyntaxError: (.+)",
+             lambda m: f"Syntax error: {m.group(1)}"),
+        ]
+
+        for pattern, formatter in patterns:
+            match = re.search(pattern, error_message)
+            if match:
+                return formatter(match)
+
+        # Fallback: extract first line after "Error" or "Exception"
+        lines = error_message.split('\n')
+        for line in lines:
+            if 'Error' in line or 'Exception' in line:
+                return line.strip()[:100]
+
+        return "Unknown error"
 
     async def get_collection_stats(self) -> dict:
         """Get statistics about all collections.
@@ -393,6 +642,8 @@ class ChromaDBService:
             "scenes_count": 0,
             "docs_count": 0,
             "errors_count": 0,
+            "api_count": 0,
+            "patterns_count": 0,
         }
 
         if not self.available:
@@ -405,6 +656,10 @@ class ChromaDBService:
                 stats["docs_count"] = self._docs_collection.count()
             if self._errors_collection:
                 stats["errors_count"] = self._errors_collection.count()
+            if self._api_collection:
+                stats["api_count"] = self._api_collection.count()
+            if self._patterns_collection:
+                stats["patterns_count"] = self._patterns_collection.count()
         except Exception as e:
             logger.warning("Failed to get collection stats: %s", e)
 
@@ -439,6 +694,16 @@ class ChromaDBService:
                 self._errors_collection = self._client.get_or_create_collection(
                     name=collection_name,
                     metadata={"description": "Error patterns and fixes"},
+                )
+            elif collection_name == self.config.rag_collection_api:
+                self._api_collection = self._client.get_or_create_collection(
+                    name=collection_name,
+                    metadata={"description": "Manimgl API signatures and parameters"},
+                )
+            elif collection_name == self.config.rag_collection_patterns:
+                self._patterns_collection = self._client.get_or_create_collection(
+                    name=collection_name,
+                    metadata={"description": "3b1b animation patterns and templates"},
                 )
             return True
         except Exception as e:

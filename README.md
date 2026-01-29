@@ -13,12 +13,18 @@ Works as a **CLI tool**, an **LLM-powered agent**, or an **MCP server** for inte
 
 ## Features
 
-- **RAG-powered code generation** - Uses 3,100+ indexed 3Blue1Brown scenes for high-quality examples
+- **RAG-powered code generation** - Uses 5,300+ indexed documents for high-quality code generation:
+  - 3,140 3Blue1Brown scene examples
+  - 1,652 manimgl API signatures with exact parameters
+  - 101 animation pattern templates (Riemann sums, transforms, physics, etc.)
+  - 470 library documentation files
+  - 16+ error patterns for common mistakes
+- **Multi-animation videos** - Each video uses 2+ animation patterns for professional quality
 - **Multi-agent pipeline** - Concept analysis, scene planning, code generation, and code review
 - **Self-learning** - Stores error patterns and fixes for continuous improvement
 - **Multi-provider LLM** - Supports Google Gemini and Anthropic Claude
 - **Audio narration** - Optional TTS with Gemini voices
-- **ChromaDB integration** - Vector similarity search for relevant code examples
+- **Parameter validation** - API signatures prevent invalid method calls
 
 ## Quick Start
 
@@ -102,17 +108,29 @@ manim-mcp serve --transport streamable-http
 
 ### RAG Indexing
 
-Index 3Blue1Brown scenes and manimgl library documentation:
+Index all knowledge sources for best code generation quality:
 
 ```bash
-# Index from 3b1b videos repository
-manim-mcp index-3b1b /path/to/3b1b/videos
+# Check current index status
+manim-mcp index status
 
-# Index manimgl library source
-manim-mcp index-lib
+# Index 3b1b video scenes (3,140 scenes)
+manim-mcp index 3b1b-videos --path /path/to/3b1b/videos
 
-# Check collection stats
-manim-mcp rag-stats
+# Index manimgl API signatures (1,652 signatures)
+manim-mcp index api
+
+# Index animation patterns (101 patterns)
+manim-mcp index patterns
+
+# Index error patterns (16+ patterns)
+manim-mcp index errors
+
+# Index library documentation (470 docs)
+manim-mcp index manim-docs
+
+# Clear a collection
+manim-mcp index clear patterns --yes
 ```
 
 ## Docker
@@ -141,11 +159,11 @@ This starts:
 │                    │                   │                │                │   │
 │                    ▼                   ▼                ▼                ▼   │
 │              ┌─────────────────────────────────────────────────────────┐     │
-│              │                    ChromaDB RAG                         │     │
-│              │  ┌──────────────┬──────────────┬──────────────────┐    │     │
-│              │  │ manim_scenes │  manim_docs  │  error_patterns  │    │     │
-│              │  │   (3,138)    │    (470)     │  (self-learning) │    │     │
-│              │  └──────────────┴──────────────┴──────────────────┘    │     │
+│              │                    ChromaDB RAG (5,300+ docs)           │     │
+│              │  ┌──────────┬──────────┬──────────┬────────┬────────┐  │     │
+│              │  │  scenes  │   api    │ patterns │  docs  │ errors │  │     │
+│              │  │  (3,140) │ (1,652)  │  (101)   │ (470)  │  (16)  │  │     │
+│              │  └──────────┴──────────┴──────────┴────────┴────────┘  │     │
 │              └─────────────────────────────────────────────────────────┘     │
 │                                                                              │
 └──────────────────────────────────┬──────────────────────────────────────────┘
@@ -173,9 +191,10 @@ This starts:
 |-----------|-------------|
 | **ConceptAnalyzer** | Extracts domain, complexity, and key concepts from prompts |
 | **ScenePlanner** | Designs animation structure, timing, and transitions |
-| **CodeGenerator** | Generates manimgl code with RAG few-shot examples |
+| **CodeGenerator** | Generates manimgl code using scenes, API signatures, and animation patterns |
 | **CodeReviewer** | Validates code quality and applies fixes |
-| **ChromaDBService** | Vector similarity search across 3,600+ indexed documents |
+| **ParameterValidator** | Validates method parameters against API signatures |
+| **ChromaDBService** | Vector similarity search across 5,300+ indexed documents |
 | **CodeSandbox** | AST-based security validation (blocks dangerous code) |
 | **ManimRenderer** | Executes manimgl with xvfb for headless rendering |
 | **S3Storage** | Uploads to MinIO/S3 with presigned URLs |
@@ -185,9 +204,11 @@ This starts:
 
 | Collection | Documents | Description |
 |------------|-----------|-------------|
-| `manim_scenes` | 3,138 | Production 3Blue1Brown scene code |
-| `manim_docs` | 470 | manimgl library API documentation |
-| `error_patterns` | dynamic | Self-learning error/fix patterns |
+| `manim_scenes` | 3,140 | Production 3Blue1Brown scene code |
+| `manim_api` | 1,652 | API signatures with exact parameters |
+| `animation_patterns` | 101 | Reusable animation templates |
+| `manim_docs` | 470 | manimgl library documentation |
+| `error_patterns` | 16+ | Self-learning error/fix patterns |
 
 ### Self-Learning
 

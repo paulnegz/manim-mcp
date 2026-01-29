@@ -56,7 +56,8 @@ class ConceptAnalyzerAgent(BaseAgent):
                 complexity=complexity,
                 key_concepts=result.get("key_concepts", [])[:5],
                 visual_elements=result.get("visual_elements", [])[:10],
-                suggested_duration=min(max(result.get("suggested_duration", 15), 5), 60),
+                # Target 30+ second animations for educational depth
+                suggested_duration=min(max(result.get("suggested_duration", 30), 20), 90),
             )
 
         except Exception as e:
@@ -68,7 +69,7 @@ class ConceptAnalyzerAgent(BaseAgent):
                 complexity=Complexity.moderate,
                 key_concepts=[],
                 visual_elements=[],
-                suggested_duration=15,
+                suggested_duration=30,  # Default 30 seconds for educational depth
             )
 
     async def _store_error(self, prompt: str, error: str) -> None:

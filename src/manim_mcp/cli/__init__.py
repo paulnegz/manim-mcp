@@ -90,10 +90,19 @@ def _build_parser() -> argparse.ArgumentParser:
     idx_clear = index_sub.add_parser("clear", help="Clear a RAG collection")
     idx_clear.add_argument(
         "collection",
-        choices=["scenes", "docs", "errors", "all"],
+        choices=["scenes", "docs", "errors", "api", "patterns", "all"],
         help="Collection to clear",
     )
     idx_clear.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+
+    # index api
+    index_sub.add_parser("api", help="Index manimgl API signatures for parameter validation")
+
+    # index errors
+    index_sub.add_parser("errors", help="Pre-populate error patterns from code_bridge.py knowledge")
+
+    # index patterns
+    index_sub.add_parser("patterns", help="Index 3b1b animation patterns for code generation")
 
     return parser
 
