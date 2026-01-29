@@ -510,8 +510,44 @@ class AnimationPipeline:
         return output
 
     async def _generate_and_validate(self, prompt: str) -> str:
-        code = await self.llm.generate_code(prompt)
+        """Generate code with optional RAG context and validate.
+
+        Uses RAG to find similar scenes for few-shot context when available.
+        """
+        # Query RAG for similar scenes if available
+        enhanced_prompt = prompt
+        if self.rag and self.rag.available:
+            try:
+                similar_scenes = await self.rag.search_similar_scenes(
+                    query=prompt,
+                    n_results=3,
+                    prioritize_3b1b=True,
+                )
+                if similar_scenes:
+                    logger.info("[RAG] Found %d similar scenes for context", len(similar_scenes))
+                    rag_context = self._build_rag_context(similar_scenes)
+                    enhanced_prompt = f"{prompt}\n\nHere are some similar animations for reference:\n{rag_context}"
+            except Exception as e:
+                logger.warning("[RAG] Failed to query similar scenes: %s", e)
+
+        code = await self.llm.generate_code(enhanced_prompt)
         return await self._validate_with_retries(code)
+
+    def _build_rag_context(self, similar_scenes: list[dict]) -> str:
+        """Format RAG results as context for generation."""
+        lines = []
+        for i, scene in enumerate(similar_scenes[:3], 1):
+            meta = scene.get("metadata", {})
+            prompt_hint = meta.get("prompt", "")[:100]
+            if prompt_hint:
+                lines.append(f"\nExample {i} (prompt: {prompt_hint}):")
+            else:
+                lines.append(f"\nExample {i}:")
+            # Show code snippet (first 800 chars)
+            code = scene.get("content", "")[:800]
+            if code:
+                lines.append(f"```python\n{code}\n```")
+        return "\n".join(lines)
 
     async def _edit_and_validate(self, original_code: str, instructions: str) -> str:
         code = await self.llm.edit_code(original_code, instructions)

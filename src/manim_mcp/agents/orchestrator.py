@@ -126,10 +126,11 @@ class AgentOrchestrator:
                 result.generated_code = generated_code
                 result.original_template_code = template_code
             else:
-                # Fallback to simple generation
-                logger.info("Falling back to simple generation (no plan)")
+                # Fallback to simple generation with RAG context
+                logger.info("Falling back to simple generation with RAG (no plan)")
                 async with asyncio.timeout(AGENT_TIMEOUTS["code_generator"]):
-                    result.generated_code = await self.llm.generate_code(prompt)
+                    result.generated_code = await self.generate_simple(prompt)
+                result.rag_context_used = self.rag is not None and self.rag.available
         except asyncio.TimeoutError:
             logger.error("Code generation timed out after %ds", AGENT_TIMEOUTS["code_generator"])
             await self._store_agent_error("code_generation", "timeout", prompt=prompt)
@@ -191,9 +192,11 @@ class AgentOrchestrator:
         return result
 
     async def generate_simple(self, prompt: str) -> str:
-        """Simple generation without the full pipeline.
+        """Simple generation with RAG context but without the full agent pipeline.
 
-        This is equivalent to the original single-LLM-call approach.
+        Uses RAG to find similar scenes for few-shot context, then generates
+        code with the LLM. This is faster than the full pipeline but still
+        benefits from RAG examples.
 
         Args:
             prompt: User's animation request
@@ -201,7 +204,47 @@ class AgentOrchestrator:
         Returns:
             Generated Manim code
         """
+        # Query RAG for similar scenes if available
+        rag_context = ""
+        if self.rag and self.rag.available:
+            try:
+                logger.info("[RAG] Searching similar scenes for simple generation")
+                similar_scenes = await self.rag.search_similar_scenes(
+                    query=prompt,
+                    n_results=3,
+                    prioritize_3b1b=True,
+                )
+                if similar_scenes:
+                    logger.info(
+                        "[RAG] Found %d similar scenes for context",
+                        len(similar_scenes),
+                    )
+                    rag_context = self._build_rag_context(similar_scenes)
+            except Exception as e:
+                logger.warning("[RAG] Failed to query similar scenes: %s", e)
+
+        # Build prompt with RAG context if available
+        if rag_context:
+            enhanced_prompt = f"{prompt}\n\nHere are some similar animations for reference:\n{rag_context}"
+            return await self.llm.generate_code(enhanced_prompt)
+
         return await self.llm.generate_code(prompt)
+
+    def _build_rag_context(self, similar_scenes: list[dict]) -> str:
+        """Format RAG results as context for generation."""
+        lines = []
+        for i, scene in enumerate(similar_scenes[:3], 1):
+            meta = scene.get("metadata", {})
+            prompt_hint = meta.get("prompt", "")[:100]
+            if prompt_hint:
+                lines.append(f"\nExample {i} (prompt: {prompt_hint}):")
+            else:
+                lines.append(f"\nExample {i}:")
+            # Show code snippet (first 800 chars)
+            code = scene.get("content", "")[:800]
+            if code:
+                lines.append(f"```python\n{code}\n```")
+        return "\n".join(lines)
 
     async def _store_agent_error(
         self,
