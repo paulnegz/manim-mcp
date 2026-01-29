@@ -10,23 +10,49 @@ from manim_mcp.models import ConceptAnalysis, ScenePlan, SceneSegment
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are an expert Manim animation planner. Given a concept analysis and user prompt,
-create a detailed scene plan with:
+You are Grant Sanderson (3Blue1Brown), planning a mathematical animation that builds
+intuition through elegant visual storytelling.
+
+Create a detailed scene plan with:
 
 1. **title**: A descriptive title for the scene
-2. **segments**: List of animation segments, each with:
-   - name: Short segment name
-   - description: What happens in this segment
-   - duration: Duration in seconds (0.5-10)
-   - mobjects: List of Manim objects used (Circle, Text, Axes, etc.)
-   - animations: List of animations used (Create, Write, FadeIn, Transform, etc.)
+2. **segments**: List of animation segments following the 3b1b arc
 
-Structure the animation as:
-- Introduction (show title, set context)
-- Main content (build up the core concept step by step)
-- Conclusion (summarize or show final result)
+MANDATORY 4-PHASE STRUCTURE (3Blue1Brown style):
 
-Keep total duration between 10-45 seconds. Use smooth transitions between segments.
+Phase 1: ESTABLISH (2-3 seconds)
+- Show what we're looking at
+- Display title or introduce the main object
+- Mobjects: Text/title, initial shapes
+- Animations: Write, FadeIn, Create
+
+Phase 2: BUILD (main content, 5-15 seconds)
+- Progressive reveal - NEVER jump to the answer
+- Show intermediate steps, relationships
+- Use LaggedStart for staggered reveals
+- Use TransformFromCopy to show relationships
+- Split into 2-4 sub-segments
+
+Phase 3: INSIGHT (2-4 seconds)
+- Highlight the key moment/result
+- Slow down for emphasis
+- Mobjects: Key result, highlight boxes
+- Animations: Indicate, FlashAround, Transform (slower run_time)
+
+Phase 4: RESOLVE (2-3 seconds)
+- Let the final state breathe
+- Clean up or show final arrangement
+- End with longer wait (2+ seconds)
+- Animations: FadeOut (old elements), final positioning
+
+Each segment needs:
+- name: Short segment name
+- description: What happens (be specific about the visual)
+- duration: Duration in seconds (0.5-10)
+- mobjects: Manim objects (Circle, MathTex, Axes, Arrow, VGroup, etc.)
+- animations: 3b1b-style animations (LaggedStart, TransformFromCopy, FadeTransform, Indicate, etc.)
+
+Keep total duration between 12-30 seconds. Use smooth transitions.
 
 Respond in JSON format with keys: title, segments (array), total_duration."""
 
@@ -119,13 +145,14 @@ class ScenePlannerAgent(BaseAgent):
             )
 
         except Exception as e:
-            logger.warning("Scene planning failed, using default: %s", e)
+            logger.warning("Scene planning failed, using default 3b1b arc: %s", e)
             # Store error for learning
             await self._store_error(prompt, str(e))
+            default_segments = self._default_segments()
             return ScenePlan(
                 title="Animation",
-                segments=[self._default_segment()],
-                total_duration=10.0,
+                segments=default_segments,
+                total_duration=sum(s.duration for s in default_segments),
                 rag_examples=rag_examples,
             )
 
@@ -184,8 +211,41 @@ class ScenePlannerAgent(BaseAgent):
                 lines.append(f"   Code preview: {code[:200]}...")
         return "\n".join(lines)
 
+    def _default_segments(self) -> list[SceneSegment]:
+        """Create default segments following 3b1b arc when planning fails."""
+        return [
+            SceneSegment(
+                name="Establish",
+                description="Show title and introduce the main concept",
+                duration=2.5,
+                mobjects=["Text"],
+                animations=["Write", "FadeIn"],
+            ),
+            SceneSegment(
+                name="Build",
+                description="Progressive reveal of the main content",
+                duration=8.0,
+                mobjects=["Circle", "Text", "VGroup"],
+                animations=["Create", "LaggedStart", "Transform"],
+            ),
+            SceneSegment(
+                name="Insight",
+                description="Highlight the key result",
+                duration=3.0,
+                mobjects=["SurroundingRectangle"],
+                animations=["Indicate", "FlashAround"],
+            ),
+            SceneSegment(
+                name="Resolve",
+                description="Let the final state breathe",
+                duration=2.5,
+                mobjects=[],
+                animations=["FadeOut", "wait"],
+            ),
+        ]
+
     def _default_segment(self) -> SceneSegment:
-        """Create a default segment when planning fails."""
+        """Create a single default segment (legacy fallback)."""
         return SceneSegment(
             name="Main",
             description="Create and animate the main content",

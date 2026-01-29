@@ -5,9 +5,13 @@ from __future__ import annotations
 import logging
 
 from manim_mcp.agents.base import BaseAgent
+from manim_mcp.core.quality import AnimationQualityScorer, QualityScore
 from manim_mcp.models import CodeReviewResult, ScenePlan
 
 logger = logging.getLogger(__name__)
+
+# Quality scorer for 3b1b pattern detection
+_quality_scorer = AnimationQualityScorer()
 
 SYSTEM_PROMPT = """\
 You are an expert Manim code reviewer. Review the provided code for:
@@ -57,8 +61,28 @@ class CodeReviewerAgent(BaseAgent):
         """
         logger.debug("Reviewing code (%d chars)", len(code))
 
+        # Score code quality against 3b1b patterns
+        quality_score = _quality_scorer.score(code)
+        logger.info(
+            "[QUALITY] Score: %d/50 (grade=%s) - pacing=%d, transforms=%d, reveals=%d, colors=%d, structure=%d",
+            quality_score.total_score,
+            quality_score.grade,
+            quality_score.pacing_score,
+            quality_score.transform_score,
+            quality_score.reveal_score,
+            quality_score.color_score,
+            quality_score.structure_score,
+        )
+        if quality_score.patterns_found:
+            logger.debug("[QUALITY] Patterns: %s", ", ".join(quality_score.patterns_found))
+        if quality_score.issues_found:
+            logger.debug("[QUALITY] Issues: %s", ", ".join(quality_score.issues_found))
+
         # First, do static checks
         static_issues = self._static_checks(code)
+
+        # Add quality issues from scorer
+        static_issues.extend(quality_score.issues_found)
 
         # Quality comparison if we have original template
         if original_template:
