@@ -79,6 +79,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # index manim-docs
     index_sub.add_parser("manim-docs", help="Index Manim documentation and examples")
 
+    # index huggingface
+    index_sub.add_parser("huggingface", help="Index BibbyResearch/3blue1brown-manim dataset")
+
     # index custom
     idx_custom = index_sub.add_parser("custom", help="Index a custom directory")
     idx_custom.add_argument("directory", help="Directory containing Manim scenes")

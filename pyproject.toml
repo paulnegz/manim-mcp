@@ -34,6 +34,7 @@ dev = [
 rag = [
     "chromadb>=0.4.0",
     "sentence-transformers>=2.2.0",
+    "datasets>=2.14.0",
 ]
 claude = [
     "anthropic>=0.40.0",

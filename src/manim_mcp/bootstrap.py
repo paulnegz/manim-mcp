@@ -67,7 +67,7 @@ async def app_context(config: ManimMCPConfig | None = None) -> AsyncIterator[App
     if not shutil.which(config.manim_executable):
         raise ManimNotInstalledError(
             f"Manim executable '{config.manim_executable}' not found on PATH. "
-            "Install with: pip install manim"
+            "Install with: pip install manimgl"
         )
 
     _check_llm_api_key(config)

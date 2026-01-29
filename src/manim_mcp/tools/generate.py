@@ -73,7 +73,8 @@ def register_generate_tools(mcp: FastMCP) -> None:
                 transparent=transparent,
                 save_last_frame=save_last_frame,
             )
-            result = await app.pipeline.generate(
+            # Use advanced pipeline with RAG for better code generation
+            result = await app.pipeline.generate_advanced(
                 prompt=prompt, params=params, progress_callback=progress_callback
             )
             await ctx.report_progress(100, 100)

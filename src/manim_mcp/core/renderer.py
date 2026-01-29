@@ -30,6 +30,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def prepare_code_for_manimgl(code: str) -> str:
+    """Prepare code to run with manimgl (3b1b's library).
+
+    Normalizes imports to use standard manimgl import.
+    """
+    # Normalize all import variants to standard manimgl
+    replacements = [
+        (r'from manim_imports_ext import \*', 'from manimlib import *'),
+        (r'from big_ol_pile_of_manim_imports import \*', 'from manimlib import *'),
+        (r'from manim import \*', 'from manimlib import *'),  # Convert community to manimgl
+    ]
+
+    for pattern, replacement in replacements:
+        code = re.sub(pattern, replacement, code)
+
+    # Ensure we have an import
+    if 'from manimlib' not in code:
+        code = 'from manimlib import *\n' + code
+
+    return code
+
+
 @dataclass
 class RenderOutput:
     """Raw render output — the pipeline decides what to do with it."""
@@ -98,8 +120,10 @@ class ManimRenderer:
 
         try:
             scene_file = os.path.join(tmp_dir, "scene.py")
+            # Prepare code for manimgl (3b1b's library)
+            prepared_code = prepare_code_for_manimgl(input.code)
             with open(scene_file, "w") as f:
-                f.write(input.code)
+                f.write(prepared_code)
 
             cmd = self._build_command(input, scene_name, tmp_dir, scene_file)
             logger.info("Rendering: %s", " ".join(cmd))
@@ -118,7 +142,10 @@ class ManimRenderer:
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
-                raise RenderTimeoutError(f"Render timed out after {self.config.render_timeout}s")
+                raise RenderTimeoutError(
+                    f"Render timed out after {self.config.render_timeout}s",
+                    timeout_seconds=self.config.render_timeout,
+                )
 
             if proc.returncode != 0:
                 stderr_text = stderr.decode(errors="replace")[-2000:]
@@ -160,55 +187,101 @@ class ManimRenderer:
     def _build_command(
         self, input: RenderSceneInput, scene_name: str, tmp_dir: str, scene_file: str,
     ) -> list[str]:
+        """Build manimgl command for rendering.
+
+        manimgl uses different flags than manim community:
+        - No 'render' subcommand
+        - -w for write to file (required for non-interactive)
+        - -o for output directory
+        - --file_name for output filename
+        - -l/-m/-h for low/medium/high quality (like community but different internal)
+        """
+        # manimgl quality flags
+        quality_flags = {
+            "low": "-l",
+            "medium": "-m",
+            "high": "-h",
+            "production": "-h",  # manimgl doesn't have production, use high
+            "fourk": "-h",  # same
+        }
+
         cmd = [
-            self.config.manim_executable, "render",
-            f"-q{input.quality.flag}",
-            "--format", input.format.value,
-            "--media_dir", os.path.join(tmp_dir, "media"),
-            "--disable_caching",
+            "xvfb-run",  # Virtual framebuffer for headless rendering
+            "-a",  # Auto-select display number
+            "--server-args=-screen 0 1920x1080x24",  # Virtual screen resolution
+            "manimgl",
+            scene_file,
+            scene_name,
+            "-w",  # Write to file (required for headless)
+            "--video_dir", os.path.join(tmp_dir, "media"),  # Output directory
+            quality_flags.get(input.quality.value, "-m"),
         ]
-        if input.fps:
-            cmd.extend(["--fps", str(input.fps)])
-        if input.background_color:
-            cmd.extend(["-c", input.background_color])
+
+        # Resolution override
+        if input.resolution:
+            parts = input.resolution.lower().split("x")
+            if len(parts) == 2:
+                cmd.extend(["--resolution", input.resolution])
+
+        # Transparent background
         if input.transparent:
             cmd.append("-t")
-        if input.resolution:
-            cmd.extend(["-r", input.resolution])
-        if input.save_last_frame:
-            cmd.append("-s")
-        cmd.extend([scene_file, scene_name])
+
+        # manimgl doesn't support direct fps/format flags like community
+        # It outputs mp4 by default which is what we want
+
         return cmd
 
     def _find_output(self, tmp_dir: str, scene_name: str, input: RenderSceneInput) -> str | None:
+        """Find the rendered output file.
+
+        manimgl outputs to different locations than manim community.
+        Search patterns cover both to be safe.
+        """
         media_dir = os.path.join(tmp_dir, "media")
         safe_name = re.sub(r'[^\w]', '', scene_name)
-        ext = input.format.value
+
+        # manimgl defaults to mp4
+        ext = "mp4"
 
         if input.save_last_frame:
             for pattern in [
-                os.path.join(media_dir, "images", "scene", f"{scene_name}*.png"),
+                os.path.join(media_dir, "images", f"{scene_name}*.png"),
                 os.path.join(media_dir, "images", "**", f"{scene_name}*.png"),
-                os.path.join(media_dir, "images", "**", f"{safe_name}*.png"),
+                os.path.join(media_dir, "**", f"{safe_name}*.png"),
+                os.path.join(media_dir, "**", "*.png"),
             ]:
                 matches = glob.glob(pattern, recursive=True)
                 if matches:
                     return matches[0]
 
+        # manimgl output patterns (simpler structure)
         for pattern in [
-            os.path.join(media_dir, "videos", "scene", "**", f"{scene_name}.{ext}"),
+            # manimgl direct output
+            os.path.join(media_dir, f"{scene_name}.{ext}"),
+            os.path.join(media_dir, "videos", f"{scene_name}.{ext}"),
+            # With date folders that manimgl sometimes uses
             os.path.join(media_dir, "videos", "**", f"{scene_name}.{ext}"),
-            os.path.join(media_dir, "videos", "**", f"{safe_name}.{ext}"),
+            os.path.join(media_dir, "**", f"{scene_name}.{ext}"),
+            os.path.join(media_dir, "**", f"{safe_name}.{ext}"),
+            # Fallback - any mp4
             os.path.join(media_dir, "**", f"*.{ext}"),
         ]:
             matches = glob.glob(pattern, recursive=True)
             if matches:
                 return matches[0]
 
+        # Final fallback - walk the tree
         for root, _, files in os.walk(media_dir):
             for f in files:
                 if f.endswith(f".{ext}") or (input.save_last_frame and f.endswith(".png")):
                     return os.path.join(root, f)
+
+        # Also check tmp_dir directly (manimgl might output there)
+        for f in os.listdir(tmp_dir):
+            if f.endswith(f".{ext}"):
+                return os.path.join(tmp_dir, f)
+
         return None
 
     def _parse_resolution(self, input: RenderSceneInput) -> tuple[int | None, int | None]:

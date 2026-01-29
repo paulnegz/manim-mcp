@@ -191,12 +191,14 @@ class ChromaDBService:
         self,
         query: str,
         n_results: int | None = None,
+        prioritize_3b1b: bool = True,
     ) -> list[dict]:
         """Search for similar Manim scenes.
 
         Args:
             query: Natural language description or code snippet
             n_results: Number of results (default from config)
+            prioritize_3b1b: If True, boost 3b1b original code and filter out generated code
 
         Returns:
             List of results with content, metadata, and similarity score
@@ -204,19 +206,67 @@ class ChromaDBService:
         if not self.available or not self._scenes_collection:
             return []
 
-        n = n_results or self.config.rag_results_limit
+        # Fetch more results so we can filter/re-rank
+        fetch_n = (n_results or self.config.rag_results_limit) * 3 if prioritize_3b1b else (n_results or self.config.rag_results_limit)
 
         try:
             results = self._scenes_collection.query(
                 query_texts=[query],
-                n_results=n,
+                n_results=fetch_n,
+                include=["documents", "metadatas", "distances"],
             )
 
-            return self._format_results(results)
+            formatted = self._format_results(results)
+
+            if prioritize_3b1b and formatted:
+                formatted = self._prioritize_3b1b_results(formatted, n_results or self.config.rag_results_limit)
+
+            return formatted
 
         except Exception as e:
             logger.warning("Scene search failed: %s", e)
             return []
+
+    def _prioritize_3b1b_results(self, results: list[dict], n_results: int) -> list[dict]:
+        """Re-rank results to prioritize 3b1b original code over generated code.
+
+        3b1b code is identified by:
+        - Has 'manim_imports_ext' in code (3b1b custom library)
+        - Has source metadata indicating 3b1b
+        - Does NOT have 'source': 'generated' in metadata
+        """
+        # Separate into 3b1b original vs generated
+        original_3b1b = []
+        other_results = []
+
+        for r in results:
+            content = r.get("content", "")
+            meta = r.get("metadata", {})
+            source = meta.get("source", "")
+
+            # Check if it's generated code (skip it)
+            if source in ("generated", "self_indexed"):
+                logger.debug("[RAG] Filtering out generated code (source=%s)", source)
+                continue
+
+            # Check if it's 3b1b original code (boost it)
+            is_3b1b = (
+                "manim_imports_ext" in content or
+                "OldTex" in content or
+                "from manim_imports_ext" in content or
+                source == "3b1b" or
+                "3blue1brown" in source.lower()
+            )
+
+            if is_3b1b:
+                original_3b1b.append(r)
+                logger.debug("[RAG] Found 3b1b original (score=%.3f)", r.get("similarity_score", 0))
+            else:
+                other_results.append(r)
+
+        # Prioritize: 3b1b first, then others
+        prioritized = original_3b1b + other_results
+        return prioritized[:n_results]
 
     async def search_documentation(
         self,
@@ -277,6 +327,60 @@ class ChromaDBService:
         except Exception as e:
             logger.warning("Error pattern search failed: %s", e)
             return []
+
+    async def store_error_pattern(
+        self,
+        error_message: str,
+        code: str,
+        fix: str | None = None,
+        prompt: str | None = None,
+    ) -> bool:
+        """Store an error pattern for future learning.
+
+        Args:
+            error_message: The error message that occurred
+            code: The code that caused the error
+            fix: The fixed code (if available)
+            prompt: The original prompt (for context)
+
+        Returns:
+            True if stored successfully
+        """
+        if not self.available or not self._errors_collection:
+            return False
+
+        try:
+            import hashlib
+            # Create unique ID from error + code hash
+            content_hash = hashlib.sha256(f"{error_message}{code[:500]}".encode()).hexdigest()[:16]
+            doc_id = f"err_{content_hash}"
+
+            # Format document for retrieval
+            if fix:
+                document = f"ERROR: {error_message}\n\nCODE:\n{code[:2000]}\n\nFIX:\n{fix[:2000]}"
+            else:
+                document = f"ERROR: {error_message}\n\nCODE:\n{code[:2000]}"
+
+            metadata = {
+                "error_type": error_message.split(":")[0] if ":" in error_message else "Unknown",
+                "has_fix": fix is not None,
+                "code_length": len(code),
+                "prompt": (prompt or "")[:200],
+            }
+
+            self._errors_collection.upsert(
+                ids=[doc_id],
+                documents=[document],
+                metadatas=[metadata],
+            )
+
+            logger.info("[RAG] Stored error pattern: %s (has_fix=%s)",
+                       error_message[:50], fix is not None)
+            return True
+
+        except Exception as e:
+            logger.warning("Failed to store error pattern: %s", e)
+            return False
 
     async def get_collection_stats(self) -> dict:
         """Get statistics about all collections.

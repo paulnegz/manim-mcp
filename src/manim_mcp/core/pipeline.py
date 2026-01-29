@@ -117,9 +117,9 @@ class AnimationPipeline:
             )
             await report("preparing", 25)
 
-            # 3. Render + upload (25-60%)
+            # 3. Render + upload with retry on runtime errors (25-60%)
             await report("rendering", 30)
-            result = await self._render_and_upload(render_id, code, scene_name, params)
+            result = await self._render_with_retries(render_id, code, scene_name, params, prompt)
             await report("uploading", 60)
 
             # 4. Generate audio narration if requested (60-90%)
@@ -351,9 +351,11 @@ class AnimationPipeline:
             )
             await report("storing", 35)
 
-            # 5. Render + upload (35-90%)
+            # 5. Render + upload with retry on runtime errors (35-90%)
             await report("rendering", 40)
-            result = await self._render_and_upload(new_id, edited_code, scene_name, params)
+            result = await self._render_with_retries(
+                new_id, edited_code, scene_name, params, original.original_prompt or instructions
+            )
             await report("uploading", 90)
 
             await report("finalizing", 95)
@@ -380,6 +382,78 @@ class AnimationPipeline:
             raise
 
     # ── Internal ───────────────────────────────────────────────────────
+
+    async def _render_with_retries(
+        self,
+        render_id: str,
+        code: str,
+        scene_name: str | None,
+        params: RenderParams,
+        prompt: str,
+    ):
+        """Render with retry on runtime errors (e.g., Manim crashes)."""
+        last_error = None
+        current_code = code
+        previous_error = None  # Track error for learning
+        previous_code = None   # Track code that failed
+
+        for attempt in range(1, self.config.gemini_max_retries + 1):
+            try:
+                result = await self._render_and_upload(render_id, current_code, scene_name, params)
+                # If we're on a retry and it succeeded, store the error→fix pattern
+                if previous_error and self.rag:
+                    await self.rag.store_error_pattern(
+                        error_message=previous_error[:500],
+                        code=previous_code[:3000],
+                        fix=current_code[:3000],  # The working code
+                        prompt=prompt[:200],
+                    )
+                    logger.info("[RAG] Stored successful error fix pattern")
+                return result
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)
+
+                # Check if this is a Manim runtime error worth retrying
+                if "Manim exited" not in error_msg and "render" not in error_msg.lower():
+                    # Not a render error, don't retry
+                    raise
+
+                if attempt < self.config.gemini_max_retries:
+                    logger.warning(
+                        "Render failed (attempt %d/%d): %s",
+                        attempt, self.config.gemini_max_retries, error_msg[:200]
+                    )
+                    # Track error for learning (before fixing)
+                    previous_error = error_msg
+                    previous_code = current_code
+                    # Ask LLM to fix the code based on runtime error
+                    await self.tracker.update_render(render_id, status=RenderStatus.generating)
+                    current_code = await self.llm.fix_code(current_code, [error_msg[:1500]])
+
+                    # Re-validate and update scene name
+                    current_code = await self._validate_with_retries(current_code)
+                    scenes = self.scene_parser.parse_scenes(current_code)
+                    scene_name = scenes[0].name if scenes else None
+                    await self.tracker.update_render(
+                        render_id, source_code=current_code, scene_name=scene_name,
+                    )
+                else:
+                    logger.error(
+                        "Render failed after %d attempts: %s",
+                        self.config.gemini_max_retries, error_msg[:500]
+                    )
+                    # Store error pattern for future learning
+                    if self.rag:
+                        await self.rag.store_error_pattern(
+                            error_message=error_msg[:500],
+                            code=current_code[:3000],
+                            fix=None,  # No fix available yet
+                            prompt=None,
+                        )
+                    raise
+
+        raise last_error  # Should not reach here
 
     async def _render_and_upload(
         self,
@@ -531,7 +605,7 @@ class AnimationPipeline:
                 metadata={
                     "prompt": prompt[:500],  # Truncate long prompts
                     "render_id": render_id,
-                    "source": "self_indexed",
+                    "source": "generated",  # Mark as generated (filtered out in RAG to prioritize 3b1b)
                 },
             )
             logger.debug("Self-indexed successful render: %s", render_id)

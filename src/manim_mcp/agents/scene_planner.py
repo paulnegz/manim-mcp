@@ -61,13 +61,29 @@ class ScenePlannerAgent(BaseAgent):
         rag_examples = []
         rag_context = ""
         if self.rag_available:
+            logger.info("[RAG] Searching similar scenes for: %s", prompt[:100])
             similar_scenes = await self.rag.search_similar_scenes(
                 query=prompt,
                 n_results=3,
+                prioritize_3b1b=True,
             )
             if similar_scenes:
                 rag_examples = [s["document_id"] for s in similar_scenes]
                 rag_context = self._build_rag_context(similar_scenes)
+                logger.info(
+                    "[RAG] Found %d similar scenes (scores: %s)",
+                    len(similar_scenes),
+                    [f"{s.get('similarity_score', 0):.3f}" for s in similar_scenes],
+                )
+                for i, s in enumerate(similar_scenes[:3], 1):
+                    meta = s.get("metadata", {})
+                    logger.debug(
+                        "[RAG] Result %d: source=%s, file=%s, score=%.3f",
+                        i, meta.get("source", "?"), meta.get("filename", "?"),
+                        s.get("similarity_score", 0),
+                    )
+            else:
+                logger.info("[RAG] No similar scenes found")
 
         # Build planning prompt
         planning_prompt = self._build_prompt(prompt, analysis, rag_context)
@@ -104,12 +120,28 @@ class ScenePlannerAgent(BaseAgent):
 
         except Exception as e:
             logger.warning("Scene planning failed, using default: %s", e)
+            # Store error for learning
+            await self._store_error(prompt, str(e))
             return ScenePlan(
                 title="Animation",
                 segments=[self._default_segment()],
                 total_duration=10.0,
                 rag_examples=rag_examples,
             )
+
+    async def _store_error(self, prompt: str, error: str) -> None:
+        """Store planning error for self-learning."""
+        if not self.rag_available:
+            return
+        try:
+            await self.rag.store_error_pattern(
+                error_message=f"[scene_planner] {error}"[:500],
+                code="",
+                fix=None,
+                prompt=prompt[:200],
+            )
+        except Exception:
+            pass  # Non-critical
 
     def _build_prompt(
         self,
