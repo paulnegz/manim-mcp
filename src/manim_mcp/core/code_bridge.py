@@ -39,7 +39,8 @@ class CEToManimglTransformer(ast.NodeTransformer):
         "get_area": "get_area_under_graph",  # CE uses get_area, manimgl uses get_area_under_graph
         "get_riemann_rectangles": "get_riemann_rectangles",  # same in both
         "arrange_submobjects": "arrange",  # CE uses arrange_submobjects, manimgl uses arrange
-        "set_color_by_tex": "set_color_by_tex_to_color_map",  # different signature
+        # Note: set_color_by_tex exists in manimgl with same signature, don't transform
+        # set_color_by_tex_to_color_map takes a DICT, set_color_by_tex takes (tex, color) args
     }
 
     # Parameters to remove entirely (not supported in manimgl)

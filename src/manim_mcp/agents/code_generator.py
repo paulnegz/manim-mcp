@@ -274,11 +274,11 @@ class CodeGeneratorAgent(BaseAgent):
 
         # Build a query that captures the math concepts and animation needs
         visual_elements = analysis.visual_elements or []
-        math_concepts = analysis.math_concepts or []
+        key_concepts = analysis.key_concepts or []
 
         query_parts = [prompt]
         query_parts.extend(visual_elements)
-        query_parts.extend(math_concepts)
+        query_parts.extend(key_concepts)
 
         # Add domain-specific keywords
         prompt_lower = prompt.lower()
