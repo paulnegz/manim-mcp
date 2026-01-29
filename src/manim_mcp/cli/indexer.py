@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Repository URLs
 REPO_3B1B_VIDEOS = "https://github.com/3b1b/videos.git"
-REPO_MANIM_DOCS = "https://github.com/ManimCommunity/manim.git"
+# Use manimgl (3b1b's fork), NOT Manim Community Edition!
+REPO_MANIMGL_DOCS = "https://github.com/3b1b/manim.git"
 
 
 async def cmd_index(
@@ -40,6 +41,12 @@ async def cmd_index(
         return await cmd_index_custom(args, ctx, printer)
     elif args.index_command == "clear":
         return await cmd_index_clear(args, ctx, printer)
+    elif args.index_command == "api":
+        return await cmd_index_api(args, ctx, printer)
+    elif args.index_command == "errors":
+        return await cmd_index_errors(args, ctx, printer)
+    elif args.index_command == "patterns":
+        return await cmd_index_patterns(args, ctx, printer)
     else:
         printer.error(f"Unknown index command: {args.index_command}")
         return 1
@@ -66,6 +73,8 @@ async def cmd_index_status(
     printer.info(f"  Scenes indexed: {stats['scenes_count']}")
     printer.info(f"  Docs indexed: {stats['docs_count']}")
     printer.info(f"  Error patterns: {stats['errors_count']}")
+    printer.info(f"  API signatures: {stats['api_count']}")
+    printer.info(f"  Animation patterns: {stats['patterns_count']}")
 
     return 0
 
@@ -115,7 +124,7 @@ async def cmd_index_docs(
     ctx: AppContext,
     printer: Printer,
 ) -> int:
-    """Index Manim documentation and examples."""
+    """Index manimgl documentation and examples (NOT Manim Community Edition!)."""
     import asyncio
     from manim_mcp.cli.output import spinner
 
@@ -123,12 +132,12 @@ async def cmd_index_docs(
         printer.error("ChromaDB not available - cannot index")
         return 1
 
-    printer.info("Cloning Manim repository for documentation...")
+    printer.info("Cloning manimgl (3b1b/manim) repository for documentation...")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        repo_path = Path(tmpdir) / "manim"
+        repo_path = Path(tmpdir) / "manimgl"
         proc = await asyncio.create_subprocess_exec(
-            "git", "clone", "--depth", "1", REPO_MANIM_DOCS, str(repo_path),
+            "git", "clone", "--depth", "1", REPO_MANIMGL_DOCS, str(repo_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -137,19 +146,17 @@ async def cmd_index_docs(
             printer.error(f"Failed to clone repository: {stderr.decode()}")
             return 1
 
-        # Index example files
-        examples_path = repo_path / "docs" / "source" / "examples"
+        # Index manimgl source code as documentation (it has good docstrings)
+        manimlib_path = repo_path / "manimlib"
+        if manimlib_path.exists():
+            count = await _index_docs_directory(manimlib_path, ctx, printer)
+            printer.success(f"Indexed {count} manimgl source files as documentation")
+
+        # Also index example scenes if they exist
+        examples_path = repo_path / "example_scenes"
         if examples_path.exists():
             count = await _index_docs_directory(examples_path, ctx, printer)
-            printer.success(f"Indexed {count} documentation examples")
-        else:
-            # Fallback to example_scenes
-            examples_path = repo_path / "example_scenes"
-            if examples_path.exists():
-                count = await _index_docs_directory(examples_path, ctx, printer)
-                printer.success(f"Indexed {count} example scenes")
-            else:
-                printer.warn("No example directories found in repository")
+            printer.success(f"Indexed {count} manimgl example scenes")
 
     return 0
 
@@ -185,7 +192,7 @@ async def cmd_index_clear(
         return 1
 
     collection = args.collection
-    valid_collections = ["scenes", "docs", "errors", "all"]
+    valid_collections = ["scenes", "docs", "errors", "api", "patterns", "all"]
     if collection not in valid_collections:
         printer.error(f"Invalid collection. Choose from: {', '.join(valid_collections)}")
         return 1
@@ -206,6 +213,8 @@ async def cmd_index_clear(
             ctx.config.rag_collection_scenes,
             ctx.config.rag_collection_docs,
             ctx.config.rag_collection_errors,
+            ctx.config.rag_collection_api,
+            ctx.config.rag_collection_patterns,
         ]
     elif collection == "scenes":
         collections_to_clear = [ctx.config.rag_collection_scenes]
@@ -213,6 +222,10 @@ async def cmd_index_clear(
         collections_to_clear = [ctx.config.rag_collection_docs]
     elif collection == "errors":
         collections_to_clear = [ctx.config.rag_collection_errors]
+    elif collection == "api":
+        collections_to_clear = [ctx.config.rag_collection_api]
+    elif collection == "patterns":
+        collections_to_clear = [ctx.config.rag_collection_patterns]
 
     with spinner(f"Clearing {collection} collection"):
         for coll_name in collections_to_clear:
@@ -460,3 +473,167 @@ def _is_manim_scene(content: str) -> bool:
         return False
 
     return True
+
+
+async def cmd_index_api(
+    args: argparse.Namespace,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Index manimgl API signatures for parameter validation."""
+    import asyncio
+    from manim_mcp.cli.output import spinner
+    from manim_mcp.cli.api_extractor import extract_api_signatures, get_known_manimgl_parameters
+
+    if not ctx.rag.available:
+        printer.error("ChromaDB not available - cannot index")
+        return 1
+
+    printer.info("Cloning manimgl (3b1b/manim) repository for API extraction...")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_path = Path(tmpdir) / "manimgl"
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", REPO_MANIMGL_DOCS, str(repo_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            printer.error(f"Failed to clone repository: {stderr.decode()}")
+            return 1
+
+        manimlib_path = repo_path / "manimlib"
+        if not manimlib_path.exists():
+            printer.error("manimlib directory not found in repository")
+            return 1
+
+        # Extract API signatures using AST
+        with spinner("Extracting API signatures from manimlib source"):
+            signatures = extract_api_signatures(manimlib_path)
+
+        printer.info(f"Extracted {len(signatures)} API signatures")
+
+        # Index each signature
+        indexed = 0
+        with spinner(f"Indexing {len(signatures)} API signatures"):
+            for sig in signatures:
+                doc = sig.to_document()
+                meta = sig.to_dict()
+
+                # Flatten parameters for metadata (ChromaDB doesn't support nested dicts)
+                param_names = [p.name for p in sig.parameters if p.name not in ("self", "cls")]
+                meta["parameter_names"] = ",".join(param_names)
+                # Remove nested parameters dict for ChromaDB compatibility
+                if "parameters" in meta:
+                    del meta["parameters"]
+
+                doc_id = await ctx.rag.index_api_signature(doc, metadata=meta)
+                if doc_id:
+                    indexed += 1
+
+        # Also index known parameter mappings (hardcoded critical methods)
+        known_params = get_known_manimgl_parameters()
+        printer.info(f"Indexing {len(known_params)} known critical method signatures")
+
+        for full_name, param_info in known_params.items():
+            parts = full_name.split(".")
+            class_name = parts[0] if len(parts) > 1 else None
+            method_name = parts[-1]
+
+            doc = f"""# {full_name}
+
+## Valid Parameters
+{', '.join(param_info['valid'])}
+
+## Invalid Parameters (CE-only, don't use)
+{', '.join(param_info['invalid'])}
+
+## Notes
+These parameters are verified to work with manimgl. Do NOT use the invalid parameters - they will cause errors.
+"""
+            meta = {
+                "id": full_name,
+                "name": method_name,
+                "class_name": class_name,
+                "valid_params": ",".join(param_info["valid"]),
+                "invalid_params": ",".join(param_info["invalid"]),
+                "is_verified": True,
+            }
+
+            doc_id = await ctx.rag.index_api_signature(doc, metadata=meta)
+            if doc_id:
+                indexed += 1
+
+    printer.success(f"Indexed {indexed} API signatures")
+    return 0
+
+
+async def cmd_index_errors(
+    args: argparse.Namespace,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Pre-populate error patterns from code_bridge.py knowledge."""
+    from manim_mcp.cli.output import spinner
+    from manim_mcp.cli.api_extractor import get_error_patterns
+
+    if not ctx.rag.available:
+        printer.error("ChromaDB not available - cannot index")
+        return 1
+
+    error_patterns = get_error_patterns()
+    printer.info(f"Indexing {len(error_patterns)} known error patterns")
+
+    indexed = 0
+    with spinner(f"Indexing {len(error_patterns)} error patterns"):
+        for pattern in error_patterns:
+            error_msg = f"Pattern: {pattern['pattern']}"
+            if pattern.get("method"):
+                error_msg += f" (in {pattern['method']})"
+
+            fix = pattern["fix"]
+            if pattern.get("example"):
+                fix += f"\n\nExample:\n{pattern['example']}"
+
+            doc_id = await ctx.rag.index_error_pattern(
+                error=error_msg,
+                fix=fix,
+            )
+
+            if doc_id:
+                indexed += 1
+
+    printer.success(f"Indexed {indexed} error patterns")
+    return 0
+
+
+async def cmd_index_patterns(
+    args: argparse.Namespace,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Index 3b1b animation patterns for code generation guidance."""
+    from manim_mcp.cli.output import spinner
+    from manim_mcp.cli.pattern_extractor import get_all_patterns
+
+    if not ctx.rag.available:
+        printer.error("ChromaDB not available - cannot index")
+        return 1
+
+    patterns = get_all_patterns()
+    printer.info(f"Indexing {len(patterns)} animation patterns")
+
+    indexed = 0
+    with spinner(f"Indexing {len(patterns)} animation patterns"):
+        for pattern in patterns:
+            doc = pattern.to_document()
+            meta = pattern.to_metadata()
+
+            doc_id = await ctx.rag.index_animation_pattern(doc, metadata=meta)
+
+            if doc_id:
+                indexed += 1
+
+    printer.success(f"Indexed {indexed} animation patterns")
+    return 0

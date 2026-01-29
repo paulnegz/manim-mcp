@@ -392,21 +392,28 @@ class AnimationPipeline:
         prompt: str,
     ):
         """Render with retry on runtime errors (e.g., Manim crashes)."""
+        from manim_mcp.core.code_bridge import bridge_code
+
         last_error = None
         current_code = code
         previous_error = None  # Track error for learning
         previous_code = None   # Track code that failed
 
         for attempt in range(1, self.config.gemini_max_retries + 1):
+            # Transform code using CE→manimgl bridge (for error tracking)
+            transformed_code = bridge_code(current_code)
+
             try:
                 result = await self._render_and_upload(render_id, current_code, scene_name, params)
                 # If we're on a retry and it succeeded, store the error→fix pattern
                 if previous_error and self.rag:
+                    previous_transformed = bridge_code(previous_code) if previous_code else None
                     await self.rag.store_error_pattern(
                         error_message=previous_error[:500],
                         code=previous_code[:3000],
                         fix=current_code[:3000],  # The working code
                         prompt=prompt[:200],
+                        transformed_code=previous_transformed[:3000] if previous_transformed else None,
                     )
                     logger.info("[RAG] Stored successful error fix pattern")
                 return result
@@ -443,13 +450,14 @@ class AnimationPipeline:
                         "Render failed after %d attempts: %s",
                         self.config.gemini_max_retries, error_msg[:500]
                     )
-                    # Store error pattern for future learning
+                    # Store error pattern for future learning (with both original and transformed)
                     if self.rag:
                         await self.rag.store_error_pattern(
                             error_message=error_msg[:500],
                             code=current_code[:3000],
                             fix=None,  # No fix available yet
-                            prompt=None,
+                            prompt=prompt[:200] if prompt else None,
+                            transformed_code=transformed_code[:3000],
                         )
                     raise
 
