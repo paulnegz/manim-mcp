@@ -1,0 +1,4 @@
+- IMPORTANT: LaTeX is NOT installed. Do NOT use MathTex, Tex, or any LaTeX-dependent class.
+- Use Text() for ALL text, including math: Text("E = mc²", font_size=36)
+- Use Unicode symbols for math: ², ³, ≠, ≤, ≥, ∑, ∫, π, θ, Δ, →, ∞, √, ±
+- For formulas, spell them out or use Unicode: Text("F = ma"), Text("a² + b² = c²")

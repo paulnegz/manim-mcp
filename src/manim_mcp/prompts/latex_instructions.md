@@ -1,0 +1,2 @@
+- Use proper LaTeX with raw strings: MathTex(r"E = mc^2")
+- Use Text() for non-math text, Tex() for mixed LaTeX text
