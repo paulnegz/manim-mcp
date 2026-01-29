@@ -4,6 +4,13 @@ Text-to-video animation powered by [Manim](https://www.manim.community/) and Goo
 
 Works as a **CLI tool**, a **Gemini-powered agent**, or an **MCP server** for integration with AI assistants.
 
+## Examples
+
+| Rotating Cube | Pythagorean Theorem |
+|---------------|---------------------|
+| `manim-mcp gen "Draw a rotating cube" -q high -f gif` | `manim-mcp generate "Explain the Pythagorean theorem"` |
+| ![Rotating Cube](assets/rotating_cube_preview.gif) | ![Pythagorean Theorem](assets/pythagorean_theorem.gif) |
+
 ## Quick Start
 
 ```bash
@@ -39,6 +46,17 @@ MANIM_MCP_S3_SECURE=false                     # optional
 manim-mcp generate "Explain the Pythagorean theorem with a visual proof"
 manim-mcp gen "Draw a rotating cube" --quality high --format gif
 ```
+
+### Generate with audio narration
+
+Add `--audio` to generate spoken narration using Gemini TTS:
+
+```bash
+manim-mcp generate "Explain the quadratic formula" --audio
+manim-mcp gen "Show a bouncing ball" --audio --voice Kore
+```
+
+Available voices: Puck, Charon, Kore, Fenrir, Aoede, and [more](https://ai.google.dev/gemini-api/docs/speech-generation).
 
 ### Edit an existing animation
 
