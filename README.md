@@ -6,10 +6,10 @@ Works as a **CLI tool**, a **Gemini-powered agent**, or an **MCP server** for in
 
 ## Examples
 
-| Rotating Cube | Pythagorean Theorem |
-|---------------|---------------------|
-| `manim-mcp gen "Draw a rotating cube" -q high -f gif` | `manim-mcp generate "Explain the Pythagorean theorem"` |
-| ![Rotating Cube](assets/rotating_cube_preview.gif) | ![Pythagorean Theorem](assets/pythagorean_theorem.gif) |
+| Circle to Square Transform | Rotating Cube |
+|---------------------------|---------------|
+| `manim-mcp gen "Transform a blue circle into a red square"` | `manim-mcp gen "Draw a rotating cube" -q high -f gif` |
+| ![Circle to Square](assets/circle_to_square.gif) | ![Rotating Cube](assets/rotating_cube_preview.gif) |
 
 ## Quick Start
 
