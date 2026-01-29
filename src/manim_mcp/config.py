@@ -41,7 +41,7 @@ class ManimMCPConfig(BaseSettings):
     s3_upload_retry_attempts: int = 3
     s3_max_upload_size_mb: int = 500
 
-    manim_executable: str = "manim"
+    manim_executable: str = "manimgl"
     default_quality: DefaultQuality = DefaultQuality.medium
     default_format: DefaultFormat = DefaultFormat.mp4
     render_timeout: int = 180
@@ -79,6 +79,21 @@ class ManimMCPConfig(BaseSettings):
     rag_collection_scenes: str = "manim_scenes"
     rag_collection_docs: str = "manim_docs"
     rag_collection_errors: str = "error_patterns"
+
+    # Enhanced RAG settings (Anthropic Contextual Retrieval approach)
+    rag_use_enhanced: bool = True  # Use enhanced RAG with hybrid search
+    rag_hybrid_search: bool = True  # Enable BM25 + Dense hybrid search
+    rag_use_reranking: bool = True  # Enable Cohere reranking (requires COHERE_API_KEY)
+    rag_contextual_embeddings: bool = True  # Generate contextual prefixes
+
+    # Voyage AI settings (code-specific embeddings)
+    voyage_api_key: str = ""  # VOYAGE_API_KEY for voyage-code-3
+    voyage_model: str = "voyage-code-3"
+    voyage_dimension: int = 1024  # Matryoshka: 256, 512, 1024, 2048
+
+    # Cohere settings (reranking)
+    cohere_api_key: str = ""  # COHERE_API_KEY for reranking
+    cohere_rerank_model: str = "rerank-english-v3.0"
 
     # Agent mode: simple (direct LLM) or advanced (multi-agent pipeline)
     agent_mode: str = "simple"

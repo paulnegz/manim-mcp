@@ -77,6 +77,8 @@ class AgentOrchestrator:
             )
         except Exception as e:
             logger.warning("Concept analysis failed: %s", e)
+            # Store error for learning
+            await self._store_agent_error("concept_analysis", str(e), prompt=prompt)
             # Continue without analysis
 
         # 2. Scene Planning
@@ -94,23 +96,29 @@ class AgentOrchestrator:
                 )
         except Exception as e:
             logger.warning("Scene planning failed: %s", e)
+            # Store error for learning
+            await self._store_agent_error("scene_planning", str(e), prompt=prompt)
             # Continue without plan
 
         # 3. Code Generation
         logger.debug("Step 3: Code generation")
         try:
             if result.concept_analysis and result.scene_plan:
-                result.generated_code = await self.code_generator.process(
+                generated_code, template_code = await self.code_generator.process(
                     prompt,
                     result.concept_analysis,
                     result.scene_plan,
                 )
+                result.generated_code = generated_code
+                result.original_template_code = template_code
             else:
                 # Fallback to simple generation
                 logger.info("Falling back to simple generation (no plan)")
                 result.generated_code = await self.llm.generate_code(prompt)
         except Exception as e:
             logger.error("Code generation failed: %s", e)
+            # Store error for learning
+            await self._store_agent_error("code_generation", str(e), prompt=prompt)
             raise
 
         # 4. Code Review (with iteration)
@@ -118,7 +126,11 @@ class AgentOrchestrator:
         code = result.generated_code
         for iteration in range(max_review_iterations):
             try:
-                review = await self.code_reviewer.process(code, result.scene_plan)
+                review = await self.code_reviewer.process(
+                    code,
+                    result.scene_plan,
+                    original_template=result.original_template_code,
+                )
                 result.review_result = review
 
                 if review.approved:
@@ -142,6 +154,8 @@ class AgentOrchestrator:
 
             except Exception as e:
                 logger.warning("Code review failed: %s", e)
+                # Store error for learning
+                await self._store_agent_error("code_review", str(e), prompt=prompt, code=code)
                 break
 
         logger.info(
@@ -165,3 +179,31 @@ class AgentOrchestrator:
             Generated Manim code
         """
         return await self.llm.generate_code(prompt)
+
+    async def _store_agent_error(
+        self,
+        agent_name: str,
+        error: str,
+        prompt: str | None = None,
+        code: str | None = None,
+    ) -> None:
+        """Store an agent error for self-learning.
+
+        All errors in the pipeline are stored to the RAG error_patterns
+        collection so the system can learn from failures.
+        """
+        if not self.rag or not self.rag.available:
+            return
+
+        try:
+            error_message = f"[{agent_name}] {error}"
+            await self.rag.store_error_pattern(
+                error_message=error_message[:500],
+                code=code[:3000] if code else "",
+                fix=None,  # No fix available at this stage
+                prompt=prompt[:200] if prompt else None,
+            )
+            logger.debug("[RAG] Stored %s error pattern", agent_name)
+        except Exception as e:
+            # Non-critical, just log
+            logger.debug("Failed to store agent error: %s", e)

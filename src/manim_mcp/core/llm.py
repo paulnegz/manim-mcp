@@ -69,6 +69,13 @@ Common patterns:
 - Graph: axes.plot(lambda x: f(x), color=BLUE)
 - Cleanup: self.play(FadeOut(*self.mobjects)) before new sections
 
+CRITICAL API RULES - Do NOT violate these:
+- ONLY use documented Manim CE parameters. Do NOT invent parameter names.
+- Animation classes (FadeIn, Write, Create, etc.) accept: mobject, run_time, rate_func
+- Mobject classes do NOT accept: derivative_function, stagger, or other made-up args
+- If unsure about a parameter, OMIT it - better to use defaults than invalid args
+- Check the Manim CE docs mentally before using any parameter
+
 Return ONLY the Python code. No markdown fences. No explanations. No comments
 outside the code."""
 
@@ -123,6 +130,12 @@ FIX_SYSTEM = """\
 You are an expert Manim Community Edition developer. The following code has
 validation errors. Fix the code to resolve them while preserving the intended
 animation.
+
+Common fixes:
+- "unexpected keyword argument X" → REMOVE that parameter entirely, it doesn't exist
+- TypeError in Animation.__init__ → Remove invalid kwargs from animation calls
+- TypeError in Mobject.__init__ → Remove invalid kwargs from mobject constructors
+- Only use documented Manim CE parameters: run_time, rate_func, color, font_size, etc.
 
 Return ONLY the fixed Python code. No markdown fences. No explanations."""
 

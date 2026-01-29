@@ -44,6 +44,7 @@ class CodeReviewerAgent(BaseAgent):
         self,
         code: str,
         plan: ScenePlan | None = None,
+        original_template: str | None = None,
     ) -> CodeReviewResult:
         """Review generated Manim code and optionally fix issues.
 
@@ -58,6 +59,11 @@ class CodeReviewerAgent(BaseAgent):
 
         # First, do static checks
         static_issues = self._static_checks(code)
+
+        # Quality comparison if we have original template
+        if original_template:
+            quality_issues = self._check_quality_preserved(code, original_template)
+            static_issues.extend(quality_issues)
 
         # Check RAG for similar error patterns
         rag_suggestions = []
@@ -85,6 +91,11 @@ class CodeReviewerAgent(BaseAgent):
 
             if issues:
                 approved = False
+                # Store issues for learning (but not as critical as exceptions)
+                if len(issues) > 0:
+                    await self._store_review_error(
+                        code, "; ".join(issues[:5]), static_issues, fixed_code
+                    )
 
             return CodeReviewResult(
                 approved=approved,
@@ -95,6 +106,8 @@ class CodeReviewerAgent(BaseAgent):
 
         except Exception as e:
             logger.warning("Code review failed: %s", e)
+            # Store error for learning
+            await self._store_review_error(code, str(e), static_issues)
             # If review fails but static checks pass, cautiously approve
             if not static_issues:
                 return CodeReviewResult(approved=True)
@@ -107,9 +120,15 @@ class CodeReviewerAgent(BaseAgent):
         """Perform static checks on the code."""
         issues = []
 
-        # Check for required imports
-        if "from manim import" not in code and "import manim" not in code:
-            issues.append("Missing Manim import (need 'from manim import *')")
+        # Check for required imports (manimgl)
+        has_import = any(x in code for x in [
+            "from manimlib import",
+            "import manimlib",
+            "from manim_imports_ext import",
+            "from big_ol_pile_of_manim_imports import",
+        ])
+        if not has_import:
+            issues.append("Missing manimlib import (need 'from manimlib import *')")
 
         # Check for Scene class
         if "class " not in code or "(Scene)" not in code:
@@ -131,6 +150,19 @@ class CodeReviewerAgent(BaseAgent):
             # Empty play calls
             if "self.play()" in code:
                 issues.append("Empty self.play() call (needs animation argument)")
+
+        return issues
+
+    def _check_quality_preserved(self, code: str, original: str) -> list[str]:
+        """Check that generated code maintains quality of the original template."""
+        issues = []
+
+        # Simple size comparison - if code shrank significantly, flag it
+        if len(code) < len(original) * 0.5:
+            issues.append(
+                f"Code size dropped significantly: {len(original)} → {len(code)} chars"
+            )
+            logger.warning("[QUALITY-CHECK] Code size dropped: %d → %d", len(original), len(code))
 
         return issues
 
@@ -189,3 +221,35 @@ class CodeReviewerAgent(BaseAgent):
             ])
 
         return "\n".join(parts)
+
+    async def _store_review_error(
+        self,
+        code: str,
+        error: str,
+        static_issues: list[str] | None = None,
+        fix: str | None = None,
+    ) -> None:
+        """Store code review errors for self-learning.
+
+        All errors found during code review are stored to the RAG
+        error_patterns collection so the system can learn from failures.
+        """
+        if not self.rag_available:
+            return
+
+        try:
+            # Combine static issues with main error for richer context
+            error_message = f"[code_review] {error}"
+            if static_issues:
+                error_message += f" | Static: {'; '.join(static_issues[:3])}"
+
+            await self.rag.store_error_pattern(
+                error_message=error_message[:500],
+                code=code[:3000],
+                fix=fix[:3000] if fix else None,
+                prompt=None,
+            )
+            logger.debug("[RAG] Stored code review error pattern")
+        except Exception as e:
+            # Non-critical, just log
+            logger.debug("Failed to store review error: %s", e)

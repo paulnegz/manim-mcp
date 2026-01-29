@@ -74,6 +74,8 @@ class ConceptAnalyzerAgent(BaseAgent):
 
         except Exception as e:
             logger.warning("Concept analysis failed, using defaults: %s", e)
+            # Store error for learning
+            await self._store_error(prompt, str(e))
             return ConceptAnalysis(
                 domain=MathDomain.general,
                 complexity=Complexity.moderate,
@@ -81,3 +83,17 @@ class ConceptAnalyzerAgent(BaseAgent):
                 visual_elements=[],
                 suggested_duration=15,
             )
+
+    async def _store_error(self, prompt: str, error: str) -> None:
+        """Store analysis error for self-learning."""
+        if not self.rag_available:
+            return
+        try:
+            await self.rag.store_error_pattern(
+                error_message=f"[concept_analyzer] {error}"[:500],
+                code="",
+                fix=None,
+                prompt=prompt[:200],
+            )
+        except Exception:
+            pass  # Non-critical

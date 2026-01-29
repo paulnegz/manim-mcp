@@ -228,6 +228,7 @@ class AgentPipelineResult(BaseModel):
     generated_code: str = ""
     review_result: Optional[CodeReviewResult] = None
     rag_context_used: bool = False
+    original_template_code: Optional[str] = None  # For quality comparison
 
 
 # ── Audio / TTS Models ─────────────────────────────────────────────────
