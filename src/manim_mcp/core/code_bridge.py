@@ -235,6 +235,7 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"\bCreate\s*\(", "ShowCreation("),
         # Method name differences
         (r"\.add_coordinates\s*\(", ".add_coordinate_labels("),
+        (r"\.add_coordinates_labels\s*\(", ".add_coordinate_labels("),  # Fix common typo
         (r"\.plot\s*\(", ".get_graph("),
         (r"\.get_area\s*\(", ".get_area_under_graph("),
         (r"\.arrange_submobjects\s*\(", ".arrange("),
