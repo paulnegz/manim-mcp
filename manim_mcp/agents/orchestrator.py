@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 # Per-agent timeout configuration (seconds)
 AGENT_TIMEOUTS = {
-    "concept_analyzer": 30,   # Quick analysis
-    "scene_planner": 45,      # May need RAG lookups
-    "code_generator": 90,     # LLM generation + RAG
-    "code_reviewer": 45,      # Static + LLM review
+    "concept_analyzer": 40,   # Quick analysis
+    "scene_planner": 55,      # May need RAG lookups
+    "code_generator": 100,    # LLM generation + RAG
+    "code_reviewer": 55,      # Static + LLM review
 }
 
 

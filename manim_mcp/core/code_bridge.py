@@ -19,39 +19,124 @@ class CEToManimglTransformer(ast.NodeTransformer):
 
     # CE class names → manimgl equivalents
     CLASS_MAPPINGS = {
+        # Tex-related
         "MathTex": "Tex",
         "SingleStringMathTex": "Tex",
         "OldTex": "Tex",  # Legacy 3b1b alias
         "OldTexText": "TexText",  # Legacy 3b1b alias
-        "SurroundRectangle": "SurroundingRectangle",  # CE uses SurroundRectangle, manimgl uses SurroundingRectangle
-        # Text stays as Text in manimgl, but TexText is preferred for math labels
+        # Shapes
+        "SurroundRectangle": "SurroundingRectangle",  # CE uses SurroundRectangle
+        "BackgroundRectangle": "SurroundingRectangle",  # CE has BackgroundRectangle
+        "Cutout": "VMobject",  # CE-only, fallback
+        # Scene types (manimgl uses Scene for everything)
+        "ThreeDScene": "Scene",  # manimgl auto-detects 3D
+        "ZoomedScene": "Scene",  # CE-only
+        "MovingCameraScene": "Scene",  # CE-only, manimgl uses frame
+        "VectorScene": "Scene",  # CE-only
+        # Mobject types
+        "MarkupText": "TexText",  # CE uses MarkupText for Pango, manimgl uses TexText
+        "Paragraph": "TexText",  # CE-only, approximate
+        "Title": "TexText",  # CE-only convenience class
+        "BulletedList": "VGroup",  # CE-only
+        "Code": "TexText",  # CE-only syntax highlighting
+        # Math/geometric
+        "ComplexPlane": "NumberPlane",  # Same functionality
+        "PolarPlane": "NumberPlane",  # CE-only, approximate
+        # Indicators
+        "Cross": "VGroup",  # CE-only, fallback
+        "Checkmark": "Tex",  # CE-only
+        "Exmark": "Tex",  # CE-only
     }
 
     # CE function/animation names → manimgl equivalents
     FUNCTION_MAPPINGS = {
         "Create": "ShowCreation",
-        # Most animations have same names
+        "Uncreate": "Uncreate",  # Same in both
+        "Unwrite": "Uncreate",  # CE has Unwrite, manimgl uses Uncreate
+        "SpiralIn": "GrowFromCenter",  # CE-only, fallback to similar effect
+        "AddTextLetterByLetter": "Write",  # CE-only text animation
+        "AddTextWordByWord": "Write",  # CE-only text animation
+        "RemoveTextLetterByLetter": "Uncreate",  # CE-only
+        "TypeWithCursor": "Write",  # CE-only
+        "UntypeWithCursor": "Uncreate",  # CE-only
+        "Wiggle": "WiggleOutThenIn",  # Different name
+        "Blink": "VFadeIn",  # CE-only, approximate with VFade
+        "FadeToColor": "ApplyMethod",  # Handled differently in manimgl
+        "ScaleInPlace": "ApplyMethod",  # Use mob.animate.scale() instead
+        "ShrinkToCenter": "ApplyMethod",  # Use mob.animate.scale(0) instead
+    }
+
+    # Animations that accept multiple mobjects as varargs in CE but only one in manimgl
+    # CE: FadeOut(mob1, mob2, mob3) → manimgl: FadeOut(VGroup(mob1, mob2, mob3))
+    # This is a CRITICAL difference that causes "shapes cannot be broadcast" errors
+    VARARGS_TO_VGROUP = {
+        "FadeOut",
+        "FadeIn",
+        "GrowFromCenter",
+        "GrowFromPoint",
+        "GrowFromEdge",
+        "ShowCreation",  # Might get multiple in CE
+        "Write",
+        "Uncreate",
     }
 
     # CE method names → manimgl equivalents
     METHOD_MAPPINGS = {
+        # Axes/Graph methods
         "add_coordinates": "add_coordinate_labels",
         "plot": "get_graph",  # axes.plot() → axes.get_graph()
         "get_area": "get_area_under_graph",  # CE uses get_area, manimgl uses get_area_under_graph
         "get_riemann_rectangles": "get_riemann_rectangles",  # same in both
-        "arrange_submobjects": "arrange",  # CE uses arrange_submobjects, manimgl uses arrange
-        # Note: set_color_by_tex exists in manimgl with same signature, don't transform
-        # set_color_by_tex_to_color_map takes a DICT, set_color_by_tex takes (tex, color) args
+        "get_line_graph": "get_graph",  # CE-only
+        "plot_line_graph": "get_graph",  # CE-only
+        "plot_surface": "get_graph",  # CE 3D, approximate
+        # Arrangement methods
+        "arrange_submobjects": "arrange",  # CE uses arrange_submobjects
+        "arrange_in_grid": "arrange_in_grid",  # Same but check params
+        # Color methods
+        "set_color_by_gradient": "set_color",  # CE-only, approximate
+        "set_colors_by_radial_gradient": "set_color",  # CE-only
+        # Positioning methods
+        "align_to": "align_to",  # Same in both
+        "match_x": "match_x",  # Same
+        "match_y": "match_y",  # Same
+        "match_z": "match_z",  # Same
+        "match_width": "match_width",  # Same
+        "match_height": "match_height",  # Same
+        # Transform helpers
+        "become": "become",  # Same in both
+        "copy": "copy",  # Same
+        # Animation-related
+        "add_updater": "add_updater",  # Same
+        "remove_updater": "remove_updater",  # Same
+        "clear_updaters": "clear_updaters",  # Same
+        # Note: set_color_by_tex exists in manimgl with same signature
     }
 
     # Parameters to remove entirely (not supported in manimgl)
     PARAMS_TO_REMOVE = {
-        "Axes": {"tips", "x_length", "y_length", "include_numbers", "label_direction"},
-        "NumberPlane": {"tips", "x_length", "y_length", "include_numbers", "label_direction"},
-        "NumberLine": {"include_tip", "tip_width", "tip_height", "numbers_with_elongated_ticks", "label_direction", "include_numbers"},
+        # Coordinate systems
+        "Axes": {"tips", "x_length", "y_length", "include_numbers", "label_direction", "axis_config"},
+        "NumberPlane": {"tips", "x_length", "y_length", "include_numbers", "label_direction", "background_line_style", "faded_line_style", "faded_line_ratio"},
+        "NumberLine": {"include_tip", "tip_width", "tip_height", "numbers_with_elongated_ticks", "label_direction", "include_numbers", "line_to_number_direction", "decimal_number_config"},
         "ThreeDAxes": {"tips", "x_length", "y_length", "include_numbers", "label_direction"},
+        # Arrows
         "Arrow": {"tip_length", "tip_width", "max_tip_length_to_length_ratio", "max_stroke_width_to_length_ratio"},
         "Vector": {"tip_length", "tip_width"},
+        "DoubleArrow": {"tip_length", "tip_width"},
+        # Text
+        "Tex": {"tex_environment"},  # CE-only param
+        "MathTex": {"tex_environment"},
+        "Text": {"line_spacing", "disable_ligatures"},  # CE-only params
+        # Shapes
+        "Rectangle": {"grid_xstep", "grid_ystep", "mark_paths_closed"},  # CE-only
+        "Circle": {"num_components"},  # CE-only param
+        "Polygon": {"num_components"},
+        # Animations
+        "FadeIn": {"target_position"},  # CE-only param - causes issues
+        "FadeOut": {"target_position"},  # CE-only param
+        "Write": {"reverse", "remover"},  # Different in manimgl
+        "Transform": {"replace_mobject_with_target_in_scene"},  # Set via class attr in manimgl
     }
 
     # Parameter name mappings (CE name → manimgl name)
@@ -141,6 +226,20 @@ class CEToManimglTransformer(ast.NodeTransformer):
         if func_name in self.PARAMS_TO_REMOVE or func_name in self.PARAM_MAPPINGS:
             node.keywords = self._transform_keywords(func_name, node.keywords)
 
+        # Handle varargs animations: FadeOut(a, b, c) → FadeOut(VGroup(a, b, c))
+        # In ManimGL, FadeOut/FadeIn only accept a single mobject; extra args become kwargs
+        if func_name in self.VARARGS_TO_VGROUP and len(node.args) > 1:
+            # Wrap all positional args in VGroup
+            vgroup_call = ast.Call(
+                func=ast.Name(id="VGroup", ctx=ast.Load()),
+                args=node.args,
+                keywords=[],
+            )
+            node.args = [vgroup_call]
+            self.transformations_made.append(
+                f"varargs: {func_name}(a, b, ...) → {func_name}(VGroup(a, b, ...))"
+            )
+
         return node
 
     def _get_call_name(self, node: ast.Call) -> str | None:
@@ -225,43 +324,102 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
 
     # Step 3: Post-AST string replacements for patterns AST can't handle well
     post_replacements = [
+        # === CLASS NAME FIXES ===
         # MathTex that might have been missed
         (r"\bMathTex\s*\(", "Tex("),
         (r"\bSingleStringMathTex\s*\(", "Tex("),
         # Legacy 3b1b aliases
         (r"\bOldTex\s*\(", "Tex("),
         (r"\bOldTexText\s*\(", "TexText("),
+        # CE-only classes → manimgl alternatives
+        (r"\bMarkupText\s*\(", "TexText("),
+        (r"\bParagraph\s*\(", "TexText("),
+        (r"\bTitle\s*\(", "TexText("),
+        (r"\bBulletedList\s*\(", "VGroup("),
+        (r"\bCode\s*\(", "TexText("),
+        # Scene types
+        (r"class\s+(\w+)\s*\(\s*ThreeDScene\s*\)", r"class \1(Scene)"),
+        (r"class\s+(\w+)\s*\(\s*ZoomedScene\s*\)", r"class \1(Scene)"),
+        (r"class\s+(\w+)\s*\(\s*MovingCameraScene\s*\)", r"class \1(Scene)"),
+        (r"class\s+(\w+)\s*\(\s*VectorScene\s*\)", r"class \1(Scene)"),
+
+        # === ANIMATION NAME FIXES ===
         # Create animation (CE) → ShowCreation (manimgl)
         (r"\bCreate\s*\(", "ShowCreation("),
-        # Method name differences
+        # CE-only animations → manimgl alternatives
+        (r"\bCircumscribe\s*\(", "Indicate("),
+        (r"\bSpiralIn\s*\(", "GrowFromCenter("),
+        (r"\bUnwrite\s*\(", "Uncreate("),
+        (r"\bAddTextLetterByLetter\s*\(", "Write("),
+        (r"\bAddTextWordByWord\s*\(", "Write("),
+        (r"\bRemoveTextLetterByLetter\s*\(", "Uncreate("),
+        (r"\bTypeWithCursor\s*\(", "Write("),
+        (r"\bUntypeWithCursor\s*\(", "Uncreate("),
+        (r"\bWiggle\s*\(", "WiggleOutThenIn("),
+        (r"\bBlink\s*\(", "VFadeIn("),
+        (r"\bFadeToColor\s*\(", "ApplyMethod("),
+        (r"\bScaleInPlace\s*\(", "ApplyMethod("),
+        (r"\bShrinkToCenter\s*\(", "ApplyMethod("),
+        (r"\bSpinInFromNothing\s*\(", "GrowFromCenter("),  # CE-only
+        (r"\bFadeInFrom\s*\(", "FadeIn("),  # CE deprecated
+        (r"\bFadeOutAndShift\s*\(", "FadeOut("),  # CE deprecated
+
+        # === METHOD NAME FIXES ===
         (r"\.add_coordinates\s*\(", ".add_coordinate_labels("),
-        (r"\.add_coordinates_labels\s*\(", ".add_coordinate_labels("),  # Fix common typo
+        (r"\.add_coordinates_labels\s*\(", ".add_coordinate_labels("),  # Fix typo
         (r"\.plot\s*\(", ".get_graph("),
         (r"\.get_area\s*\(", ".get_area_under_graph("),
         (r"\.arrange_submobjects\s*\(", ".arrange("),
-        # 3b1b class attribute patterns - replace with actual colors
+        (r"\.get_line_graph\s*\(", ".get_graph("),
+        (r"\.plot_line_graph\s*\(", ".get_graph("),
+        # CE-only camera methods
+        (r"self\.camera\.frame\.animate", "self.frame.animate"),  # CE camera syntax
+        (r"self\.camera\.frame\.", "self.frame."),
+
+        # === 3b1b CLASS ATTRIBUTE PATTERNS ===
         (r"self\.axes_color", "GREY"),
         (r"self\.graph_color", "BLUE"),
         (r"self\.area_color", "BLUE_E"),
         (r"self\.rect_color", "YELLOW"),
         (r"self\.label_color", "WHITE"),
         (r"self\.highlight_color", "YELLOW"),
-        # Remove invalid parameters from get_riemann_rectangles (manimgl uses dx, not n_rects)
+
+        # === PARAMETER REMOVAL ===
+        # Remove invalid parameters from get_riemann_rectangles
         (r",\s*n_rects\s*=\s*\d+", ""),
         (r"n_rects\s*=\s*\d+\s*,\s*", ""),
         (r",\s*riemann_sum_type\s*=\s*['\"][^'\"]*['\"]", ""),
         (r"riemann_sum_type\s*=\s*['\"][^'\"]*['\"]\s*,\s*", ""),
-        # 3D Scene class: CE uses ThreeDScene, manimgl uses Scene (3D is automatic with 3D objects)
-        (r"class\s+(\w+)\s*\(\s*ThreeDScene\s*\)", r"class \1(Scene)"),
-        # Remove CE-only methods that don't exist in manimgl
-        (r"\s*\w+\.add_tips\s*\([^)]*\)\s*\n?", "\n"),  # axes.add_tips() doesn't exist
+        # Remove target_position (CE-only for FadeIn/FadeOut)
+        (r",\s*target_position\s*=\s*[^,\)]+", ""),
+        (r"target_position\s*=\s*[^,\)]+\s*,\s*", ""),
+        # Remove tex_environment (CE-only for Tex)
+        (r",\s*tex_environment\s*=\s*['\"][^'\"]*['\"]", ""),
+        (r"tex_environment\s*=\s*['\"][^'\"]*['\"]\s*,\s*", ""),
+
+        # === CE-ONLY METHOD REMOVAL ===
+        (r"\s*\w+\.add_tips\s*\([^)]*\)\s*\n?", "\n"),
         (r"\s*self\.add_tips\s*\([^)]*\)\s*\n?", "\n"),
-        # Remove Circumscribe (CE only) - replace with Indicate
-        (r"\bCircumscribe\s*\(", "Indicate("),
-        # Color spelling: CE uses American GRAY, manimgl uses British GREY
+        (r"\s*self\.add_fixed_in_frame_mobjects\s*\([^)]*\)\s*\n?", "\n"),  # CE-only
+
+        # === COLOR NAME FIXES ===
+        # CE uses American GRAY, manimgl uses British GREY
         (r"\bGRAY\b", "GREY"),
         (r"\bLIGHT_GRAY\b", "LIGHT_GREY"),
         (r"\bDARK_GRAY\b", "DARK_GREY"),
+        # CE-specific color names
+        (r"\bPURE_RED\b", "RED"),
+        (r"\bPURE_GREEN\b", "GREEN"),
+        (r"\bPURE_BLUE\b", "BLUE"),
+
+        # === CONSTANT FIXES ===
+        # CE uses DEGREES, manimgl uses DEG
+        (r"\bDEGREES\b", "DEG"),
+        # Frame dimensions (CE uses different names)
+        (r"\bconfig\.frame_width\b", "FRAME_WIDTH"),
+        (r"\bconfig\.frame_height\b", "FRAME_HEIGHT"),
+        (r"\bconfig\.pixel_width\b", "1920"),
+        (r"\bconfig\.pixel_height\b", "1080"),
     ]
     for pattern, replacement in post_replacements:
         if re.search(pattern, code):
@@ -277,6 +435,12 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
 
     # Step 6: Fix LaTeX issues - mixed text+math in Tex should use TexText
     code = _fix_latex_issues(code, transformations)
+
+    # Step 7: Fix varargs animations that AST might have missed (regex safety net)
+    code = _fix_varargs_animations(code, transformations)
+
+    # Step 8: Fix animate syntax differences
+    code = _fix_animate_syntax(code, transformations)
 
     return code, transformations
 
@@ -382,6 +546,72 @@ def _fix_latex_issues(code: str, transformations: list[str]) -> str:
             code
         )
         transformations.append("latex-fix: Tex with inline math → TexText")
+
+    return code
+
+
+def _fix_varargs_animations(code: str, transformations: list[str]) -> str:
+    """Fix animations that take multiple mobjects in CE but single in manimgl.
+
+    This is a regex-based safety net for cases the AST transformer missed.
+    Converts FadeOut(a, b, c) → FadeOut(VGroup(a, b, c))
+    """
+    # Animations that need varargs → VGroup transformation
+    varargs_animations = [
+        "FadeOut", "FadeIn", "GrowFromCenter", "GrowFromPoint",
+        "ShowCreation", "Write", "Uncreate"
+    ]
+
+    for anim in varargs_animations:
+        # Pattern: AnimName(arg1, arg2, ...) where there are multiple comma-separated args
+        # But NOT keyword args like shift=, scale=, etc.
+        # This is tricky because we need to distinguish positional from keyword args
+
+        # Simple heuristic: look for AnimName(something, something_else) where
+        # something_else doesn't contain '=' before any comma or close paren
+        pattern = rf"\b{anim}\s*\(\s*([^,\(\)]+(?:\[[^\]]*\])?)\s*,\s*([^=,\(\)]+(?:\[[^\]]*\])?(?:\s*,\s*[^=,\(\)]+(?:\[[^\]]*\])?)*)\s*\)"
+
+        def make_replacement(m):
+            first_arg = m.group(1).strip()
+            rest_args = m.group(2).strip()
+            # Check if rest_args contains '=' (keyword arg) - if so, don't transform
+            if '=' in rest_args.split(',')[0]:
+                return m.group(0)
+            return f"{anim}(VGroup({first_arg}, {rest_args}))"
+
+        if re.search(pattern, code):
+            new_code = re.sub(pattern, make_replacement, code)
+            if new_code != code:
+                code = new_code
+                transformations.append(f"varargs-fix: {anim}(a, b, ...) → {anim}(VGroup(...))")
+
+    return code
+
+
+def _fix_animate_syntax(code: str, transformations: list[str]) -> str:
+    """Fix .animate syntax differences between CE and manimgl.
+
+    Both use .animate, but there are subtle differences in method chaining.
+    CE: mob.animate.scale(2).shift(UP)
+    manimgl: Same, but some methods differ
+    """
+    # CE uses .animate.set_color() but manimgl might prefer .animate.set_fill()
+    # This is generally compatible, but let's handle edge cases
+
+    # Fix animate.become() which doesn't exist - use Transform instead
+    # CE: self.play(mob.animate.become(other))
+    # This should be: self.play(Transform(mob, other))
+    pattern = r"(\w+)\.animate\.become\(([^)]+)\)"
+    if re.search(pattern, code):
+        code = re.sub(pattern, r"Transform(\1, \2)", code)
+        transformations.append("animate-fix: mob.animate.become() → Transform()")
+
+    # Fix animate.match_style() if present
+    pattern = r"(\w+)\.animate\.match_style\(([^)]+)\)"
+    if re.search(pattern, code):
+        # This is tricky - just remove the animation for now
+        code = re.sub(pattern, r"\1.match_style(\2)", code)
+        transformations.append("animate-fix: removed .animate from match_style")
 
     return code
 
