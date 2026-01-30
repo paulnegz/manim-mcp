@@ -526,6 +526,12 @@ class CodeGeneratorAgent(BaseAgent):
                 "DO NOT write static code with manual transforms between states!",
                 "DO write reactive code where mobjects update automatically!",
                 "",
+                "CRITICAL LATEX/TEX RULES:",
+                "- NEVER use '&' in TexText - it's a special character! Use 'and' instead",
+                "- NEVER use set_to_corner() - use to_corner() instead",
+                "- In Tex/MathTex, escape special chars: \\& \\% \\$ \\# \\_ \\{ \\}",
+                "- For alignment in Tex, use align environment not raw &",
+                "",
                 "=" * 60,
                 f"ANIMATION PATTERNS TO APPLY (use at least 2 of these {n_patterns}):",
                 "=" * 60,
@@ -572,7 +578,7 @@ class CodeGeneratorAgent(BaseAgent):
                 "=" * 60,
                 "",
             ])
-            for sig in api_signatures[:5]:  # Limit to 5 signatures
+            for sig in api_signatures[:8]:  # Limit to 8 signatures
                 content = sig.get("content", "")
                 meta = sig.get("metadata", {})
                 method_name = meta.get("name", "")

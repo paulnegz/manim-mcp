@@ -23,6 +23,7 @@ class CEToManimglTransformer(ast.NodeTransformer):
         "SingleStringMathTex": "Tex",
         "OldTex": "Tex",  # Legacy 3b1b alias
         "OldTexText": "TexText",  # Legacy 3b1b alias
+        "SurroundRectangle": "SurroundingRectangle",  # CE uses SurroundRectangle, manimgl uses SurroundingRectangle
         # Text stays as Text in manimgl, but TexText is preferred for math labels
     }
 
@@ -49,6 +50,8 @@ class CEToManimglTransformer(ast.NodeTransformer):
         "NumberPlane": {"tips", "x_length", "y_length", "include_numbers", "label_direction"},
         "NumberLine": {"include_tip", "tip_width", "tip_height", "numbers_with_elongated_ticks", "label_direction", "include_numbers"},
         "ThreeDAxes": {"tips", "x_length", "y_length", "include_numbers", "label_direction"},
+        "Arrow": {"tip_length", "tip_width", "max_tip_length_to_length_ratio", "max_stroke_width_to_length_ratio"},
+        "Vector": {"tip_length", "tip_width"},
     }
 
     # Parameter name mappings (CE name → manimgl name)
