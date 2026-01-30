@@ -68,7 +68,7 @@ RUN pip install --no-cache-dir \
 
 # Copy project files and install (fast - deps already cached)
 COPY pyproject.toml ./
-COPY src/ src/
+COPY manim_mcp/ manim_mcp/
 
 RUN pip install --no-cache-dir -e ".[rag]"
 
