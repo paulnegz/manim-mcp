@@ -28,6 +28,7 @@ class CodeGeneratorAgent(BaseAgent):
         prompt: str,
         analysis: ConceptAnalysis,
         plan: ScenePlan,
+        narration_script: list[str] | None = None,
     ) -> tuple[str, str | None]:
         """Generate Manim code based on the scene plan.
 
@@ -35,12 +36,15 @@ class CodeGeneratorAgent(BaseAgent):
             prompt: Original user prompt
             analysis: Concept analysis from first agent
             plan: Scene plan from second agent
+            narration_script: Pre-generated narration script (for code-audio sync)
 
         Returns:
             Tuple of (generated_code, original_template_code_or_none)
         """
         logger.debug("Generating code for: %s (%d segments)",
                      plan.title, len(plan.segments))
+        if narration_script:
+            logger.info("Code will follow %d-sentence narration script", len(narration_script))
 
         # Get RAG examples for few-shot context
         rag_context = ""
@@ -80,7 +84,7 @@ class CodeGeneratorAgent(BaseAgent):
                 )
 
         # Build generation prompt
-        gen_prompt = self._build_prompt(prompt, analysis, plan, rag_context, high_quality_template, error_patterns, animation_patterns, api_signatures)
+        gen_prompt = self._build_prompt(prompt, analysis, plan, rag_context, high_quality_template, error_patterns, animation_patterns, api_signatures, narration_script)
 
         # Generate code
         system = get_code_generator_system(self.config.latex_available)
@@ -391,16 +395,45 @@ class CodeGeneratorAgent(BaseAgent):
         error_patterns: list[dict] | None = None,
         animation_patterns: list[dict] | None = None,
         api_signatures: list[dict] | None = None,
+        narration_script: list[str] | None = None,
     ) -> str:
         """Build the code generation prompt with all context."""
         parts = [
             f"Create a Manim animation: {prompt}",
             "",
+        ]
+
+        # CRITICAL: If narration script provided, code MUST match it exactly
+        if narration_script:
+            parts.extend([
+                "=" * 60,
+                "NARRATION SCRIPT - CODE MUST MATCH THIS EXACTLY",
+                "=" * 60,
+                "",
+                "The animation will have audio narration. Each sentence below corresponds",
+                "to ONE visual step. Your code MUST create visuals that sync with this script:",
+                "",
+            ])
+            for i, sentence in enumerate(narration_script, 1):
+                parts.append(f"  {i}. {sentence}")
+            parts.extend([
+                "",
+                "REQUIREMENTS:",
+                "- Each self.play() or animation should correspond to ONE narration sentence",
+                "- Add self.wait(2-3) after each animation for narration time",
+                "- The visual sequence must match the narration sequence exactly",
+                "- Total animation duration should be ~{} seconds".format(len(narration_script) * 4),
+                "",
+                "=" * 60,
+                "",
+            ])
+
+        parts.extend([
             f"Scene: {plan.title}",
             f"Total duration: ~{plan.total_duration:.1f} seconds",
             "",
             "Segments:",
-        ]
+        ])
 
         for i, seg in enumerate(plan.segments, 1):
             parts.append(f"{i}. {seg.name} ({seg.duration:.1f}s)")

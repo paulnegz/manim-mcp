@@ -31,20 +31,30 @@ class GeminiTTSService:
         self.max_concurrent = config.tts_max_concurrent
 
     async def generate_narration_script(self, prompt: str) -> list[str]:
-        """Generate narration script from animation prompt, split into sentences."""
+        """Generate narration script from animation prompt, split into sentences.
+
+        This script will be used to guide code generation - code should match this narration.
+        """
         response = await self.client.aio.models.generate_content(
             model="gemini-2.5-flash",
-            contents=f"""Create a short educational narration script (5-8 sentences) for this animation:
+            contents=f"""Create an educational narration script (6-10 sentences) for a math animation video about:
 
 {prompt}
 
-Rules:
-- Write as if narrating a video explanation
-- Each sentence should be clear and standalone
-- Keep sentences under 20 words each
-- Use simple, educational language
+The narration should:
+1. Start with an introduction to the topic
+2. Describe each visual step that should appear (e.g., "First, let's draw a coordinate plane")
+3. Explain the mathematical concepts as they would appear visually
+4. End with a summary or key takeaway
 
-Return ONLY the narration text, one sentence per line.""",
+Rules:
+- Write as if narrating a 3Blue1Brown-style video
+- Each sentence describes ONE visual step or concept
+- Be specific about what should appear (axes, vectors, equations, etc.)
+- Keep sentences under 25 words each
+- Use educational, engaging language
+
+Return ONLY the narration text, one sentence per line. Each sentence will correspond to a scene in the animation.""",
         )
         text = response.text.strip()
         # Split into sentences, filter empty
@@ -178,10 +188,19 @@ Return ONLY the narration text, one sentence per line.""",
         combined.export(output, format="wav")
         return output.getvalue()
 
-    async def generate_full_narration(self, prompt: str) -> bytes:
-        """Full pipeline: prompt → script → parallel TTS → stitched audio."""
-        logger.info("Generating narration script for prompt")
-        sentences = await self.generate_narration_script(prompt)
+    async def generate_full_narration(self, prompt: str, script: list[str] | None = None) -> bytes:
+        """Full pipeline: prompt → script → parallel TTS → stitched audio.
+
+        Args:
+            prompt: Animation prompt (used if script not provided)
+            script: Pre-generated narration script (if already generated for code sync)
+        """
+        if script:
+            sentences = script
+            logger.info("Using provided narration script with %d sentences", len(sentences))
+        else:
+            logger.info("Generating narration script for prompt")
+            sentences = await self.generate_narration_script(prompt)
         logger.info("Generated %d sentences for narration", len(sentences))
 
         logger.info("Generating audio for %d sentences in parallel", len(sentences))

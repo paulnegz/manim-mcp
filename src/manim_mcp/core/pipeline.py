@@ -102,11 +102,19 @@ class AnimationPipeline:
                 await progress_callback(stage, pct)
 
         try:
-            # 1. Generate code via Gemini (0-20%)
+            # 0. Generate narration script FIRST if audio requested (for code-audio sync)
+            narration_script = None
+            if params.audio and self.tts:
+                await report("generating", 3)
+                logger.info("Generating narration script first for code-audio sync")
+                narration_script = await self.tts.generate_narration_script(prompt)
+                logger.info("Generated %d-sentence narration script", len(narration_script))
+
+            # 1. Generate code via LLM, guided by narration script (0-20%)
             await report("generating", 5)
             await self.tracker.update_render(render_id, status=RenderStatus.generating)
             await report("generating", 10)
-            code = await self._generate_and_validate(prompt)
+            code = await self._generate_and_validate(prompt, narration_script)
             await report("validating", 20)
 
             # 2. Store generated code (20-25%)
@@ -127,7 +135,8 @@ class AnimationPipeline:
             if params.audio and result.local_path:
                 try:
                     await report("generating_audio", 65)
-                    audio_path = await self._generate_audio(prompt, render_id, params.voice)
+                    # Use the pre-generated script for perfect code-audio sync
+                    audio_path = await self._generate_audio(prompt, render_id, params.voice, narration_script)
                     await report("mixing_audio", 80)
                     if audio_path:
                         mixed_path = await self._mix_audio_video(
@@ -220,11 +229,19 @@ class AnimationPipeline:
                 await progress_callback(stage, pct)
 
         try:
+            # 0. Generate narration script FIRST if audio requested (for code-audio sync)
+            narration_script = None
+            if params.audio and self.tts:
+                await report("generating", 3)
+                logger.info("Generating narration script first for code-audio sync")
+                narration_script = await self.tts.generate_narration_script(prompt)
+                logger.info("Generated %d-sentence narration script", len(narration_script))
+
             # 1. Run multi-agent pipeline (0-20%)
             await report("analyzing", 5)
             await self.tracker.update_render(render_id, status=RenderStatus.generating)
             await report("planning", 10)
-            pipeline_result = await self.orchestrator.generate_advanced(prompt)
+            pipeline_result = await self.orchestrator.generate_advanced(prompt, narration_script)
             code = pipeline_result.generated_code
             await report("generating", 15)
 
@@ -250,7 +267,8 @@ class AnimationPipeline:
             if params.audio and result.local_path:
                 try:
                     await report("generating_audio", 65)
-                    audio_path = await self._generate_audio(prompt, render_id, params.voice)
+                    # Use the pre-generated script for perfect code-audio sync
+                    audio_path = await self._generate_audio(prompt, render_id, params.voice, narration_script)
                     await report("mixing_audio", 80)
                     if audio_path:
                         mixed_path = await self._mix_audio_video(
@@ -517,10 +535,11 @@ class AnimationPipeline:
 
         return output
 
-    async def _generate_and_validate(self, prompt: str) -> str:
+    async def _generate_and_validate(self, prompt: str, narration_script: list[str] | None = None) -> str:
         """Generate code with optional RAG context and validate.
 
         Uses RAG to find similar scenes for few-shot context when available.
+        If narration_script is provided, code will be generated to match it.
         """
         # Query RAG for similar scenes if available
         enhanced_prompt = prompt
@@ -537,6 +556,20 @@ class AnimationPipeline:
                     enhanced_prompt = f"{prompt}\n\nHere are some similar animations for reference:\n{rag_context}"
             except Exception as e:
                 logger.warning("[RAG] Failed to query similar scenes: %s", e)
+
+        # If narration script provided, include it to sync code with audio
+        if narration_script:
+            script_text = "\n".join(f"{i+1}. {sentence}" for i, sentence in enumerate(narration_script))
+            enhanced_prompt = f"""{enhanced_prompt}
+
+IMPORTANT - NARRATION SCRIPT TO FOLLOW:
+The animation MUST match this narration script exactly. Each numbered sentence corresponds to a visual step.
+
+{script_text}
+
+Generate code where each self.play() or self.wait() corresponds to one narration sentence in order.
+The timing and visuals must sync with this script."""
+            logger.info("Code generation guided by %d-sentence narration script", len(narration_script))
 
         code = await self.llm.generate_code(enhanced_prompt)
         return await self._validate_with_retries(code)
@@ -685,7 +718,7 @@ class AnimationPipeline:
     # ── Audio Generation ──────────────────────────────────────────────
 
     async def _generate_audio(
-        self, prompt: str, render_id: str, voice: str | None = None
+        self, prompt: str, render_id: str, voice: str | None = None, script: list[str] | None = None
     ) -> str | None:
         """Generate narration audio for the animation.
 
@@ -693,6 +726,7 @@ class AnimationPipeline:
             prompt: The original animation prompt
             render_id: Render ID for temp file naming
             voice: Optional voice override
+            script: Pre-generated narration script (for code-audio sync)
 
         Returns:
             Path to the generated WAV file, or None if TTS unavailable
@@ -708,7 +742,7 @@ class AnimationPipeline:
 
         try:
             logger.info("Generating audio narration for render %s", render_id)
-            audio_data = await self.tts.generate_full_narration(prompt)
+            audio_data = await self.tts.generate_full_narration(prompt, script)
 
             # Save to temp file
             import tempfile

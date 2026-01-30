@@ -59,18 +59,22 @@ class AgentOrchestrator:
     async def generate_advanced(
         self,
         prompt: str,
+        narration_script: list[str] | None = None,
         max_review_iterations: int = 2,
     ) -> AgentPipelineResult:
         """Run the full multi-agent pipeline.
 
         Args:
             prompt: User's animation request
+            narration_script: Pre-generated narration script (for code-audio sync)
             max_review_iterations: Max times to iterate on code fixes
 
         Returns:
             AgentPipelineResult with all intermediate outputs
         """
         logger.info("Starting advanced generation pipeline for: %s", prompt[:100])
+        if narration_script:
+            logger.info("Code generation will follow %d-sentence narration script", len(narration_script))
 
         result = AgentPipelineResult()
 
@@ -122,6 +126,7 @@ class AgentOrchestrator:
                         prompt,
                         result.concept_analysis,
                         result.scene_plan,
+                        narration_script,
                     )
                 result.generated_code = generated_code
                 result.original_template_code = template_code
@@ -129,7 +134,7 @@ class AgentOrchestrator:
                 # Fallback to simple generation with RAG context
                 logger.info("Falling back to simple generation with RAG (no plan)")
                 async with asyncio.timeout(AGENT_TIMEOUTS["code_generator"]):
-                    result.generated_code = await self.generate_simple(prompt)
+                    result.generated_code = await self.generate_simple(prompt, narration_script)
                 result.rag_context_used = self.rag is not None and self.rag.available
         except asyncio.TimeoutError:
             logger.error("Code generation timed out after %ds", AGENT_TIMEOUTS["code_generator"])
@@ -191,7 +196,11 @@ class AgentOrchestrator:
 
         return result
 
-    async def generate_simple(self, prompt: str) -> str:
+    async def generate_simple(
+        self,
+        prompt: str,
+        narration_script: list[str] | None = None,
+    ) -> str:
         """Simple generation with RAG context but without the full agent pipeline.
 
         Uses RAG to find similar scenes for few-shot context, then generates
@@ -200,10 +209,14 @@ class AgentOrchestrator:
 
         Args:
             prompt: User's animation request
+            narration_script: Pre-generated narration script (for code-audio sync)
 
         Returns:
             Generated Manim code
         """
+        if narration_script:
+            logger.info("Simple generation will follow %d-sentence narration script", len(narration_script))
+
         # Query RAG for similar scenes if available
         rag_context = ""
         if self.rag and self.rag.available:
@@ -223,12 +236,25 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning("[RAG] Failed to query similar scenes: %s", e)
 
-        # Build prompt with RAG context if available
+        # Build enhanced prompt
+        enhanced_prompt = prompt
         if rag_context:
             enhanced_prompt = f"{prompt}\n\nHere are some similar animations for reference:\n{rag_context}"
-            return await self.llm.generate_code(enhanced_prompt)
 
-        return await self.llm.generate_code(prompt)
+        # Add narration script guidance if provided (code-audio sync)
+        if narration_script:
+            script_text = "\n".join(f"{i+1}. {sentence}" for i, sentence in enumerate(narration_script))
+            enhanced_prompt = f"""{enhanced_prompt}
+
+IMPORTANT - NARRATION SCRIPT TO FOLLOW:
+The animation MUST match this narration script exactly. Each numbered sentence corresponds to a visual step.
+
+{script_text}
+
+Generate code where each self.play() or self.wait() corresponds to one narration sentence in order.
+The timing and visuals must sync with this script."""
+
+        return await self.llm.generate_code(enhanced_prompt)
 
     def _build_rag_context(self, similar_scenes: list[dict]) -> str:
         """Format RAG results as context for generation."""
