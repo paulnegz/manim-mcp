@@ -4498,6 +4498,534 @@ for approx in approximations[1:]:
         math_concepts=["power series", "convergence", "radius", "calculus"],
         keywords=["power series", "convergence", "radius", "sum"],
     ),
+
+    # =============================================================================
+    # ADVANCED 3B1B PATTERNS - Reactive/Declarative Style
+    # =============================================================================
+
+    AnimationPattern(
+        name="value_tracker_reactive",
+        category="updater",
+        description="""
+The signature 3b1b pattern for smooth, continuous animations. Use ValueTracker
+to control a parameter, then add updaters to mobjects that react to changes.
+This creates buttery-smooth animations where everything updates together.
+
+Key insight: Define the END STATE declaratively, let updaters handle the animation.
+""",
+        code_template="""
+# ValueTracker controls a parameter (e.g., time, x-position, slider value)
+t_tracker = ValueTracker(0)
+get_t = t_tracker.get_value
+
+# Create mobjects that depend on the tracker
+dot = Dot(color=YELLOW)
+dot.add_updater(lambda m: m.move_to(axes.c2p(get_t(), func(get_t()))))
+
+label = DecimalNumber(0, num_decimal_places=2)
+label.add_updater(lambda m: m.set_value(get_t()))
+label.add_updater(lambda m: m.next_to(dot, UP))
+
+# The graph traces the path
+trace = TracedPath(dot.get_center, stroke_color=BLUE, stroke_width=2)
+
+self.add(dot, label, trace)
+
+# Animate by changing the tracker - everything updates automatically!
+self.play(t_tracker.animate.set_value(5), run_time=4, rate_func=linear)
+""",
+        math_concepts=["calculus", "continuous", "parametric", "dynamics"],
+        keywords=["ValueTracker", "updater", "reactive", "smooth", "continuous", "TracedPath"],
+    ),
+
+    AnimationPattern(
+        name="reactive_area_integral",
+        category="updater",
+        description="""
+Show area under a curve that updates reactively as parameters change.
+Use .become() inside an updater to recreate the area each frame.
+This is how 3b1b shows integrals that change with sliders or time.
+""",
+        code_template="""
+# Parameter tracker (e.g., upper bound of integral, or function parameter)
+s_tracker = ValueTracker(1)
+get_s = s_tracker.get_value
+
+# Graph that reacts to s
+def func(t):
+    return np.exp(-get_s() * t)
+
+graph = axes.get_graph(lambda t: 1)  # Initial
+axes.bind_graph_to_func(graph, func)  # Graph auto-updates with func!
+
+# Area that recreates itself each frame
+area = axes.get_area_under_graph(graph, x_range=[0, 3])
+def update_area(area):
+    area.become(axes.get_area_under_graph(graph, x_range=[0, 3]))
+area.add_updater(update_area)
+
+self.add(graph, area)
+
+# Animate s changing - graph AND area update together smoothly
+self.play(s_tracker.animate.set_value(3), run_time=4)
+self.play(s_tracker.animate.set_value(0.5), run_time=3)
+""",
+        math_concepts=["integral", "area", "calculus", "continuous"],
+        keywords=["become", "updater", "area", "integral", "reactive", "bind_graph_to_func"],
+    ),
+
+    AnimationPattern(
+        name="camera_reorient_zoom",
+        category="camera",
+        description="""
+3b1b uses camera movements to guide attention. The frame object can be
+animated to zoom, pan, and reorient smoothly. Use time_span for
+choreographed camera moves during longer animations.
+""",
+        code_template="""
+# Get reference to the camera frame
+frame = self.frame  # or self.camera.frame in older versions
+
+# Zoom in on a specific point
+self.play(
+    frame.animate.set_height(4).move_to(point_of_interest),
+    run_time=2
+)
+
+# Pan across while something else animates
+self.play(
+    some_animation,
+    frame.animate.shift(3 * RIGHT),
+    run_time=3
+)
+
+# 3D reorientation (for ThreeDScene)
+self.play(
+    frame.animate.reorient(20, 70, 0),  # theta, phi, gamma angles
+    run_time=2
+)
+
+# Delayed camera move using time_span (starts at t=2, ends at t=5)
+self.play(
+    long_animation,  # runs full duration
+    frame.animate.reorient(0, 0, 0, (5, 3, 0), 12).set_anim_args(time_span=(2, 5)),
+    run_time=6
+)
+
+# Reset to default view
+self.play(frame.animate.to_default_state())
+""",
+        math_concepts=["visualization", "presentation", "3d"],
+        keywords=["frame", "camera", "zoom", "reorient", "time_span", "pan"],
+    ),
+
+    AnimationPattern(
+        name="transform_matching_tex",
+        category="transform",
+        description="""
+Intelligently morph between equations by matching corresponding tex parts.
+Much smoother than Transform for equations - parts that match stay in place,
+parts that differ smoothly morph. Essential for equation derivations.
+""",
+        code_template="""
+# Define equations with consistent tex structure
+eq1 = Tex(R"\\int_0^\\infty", R"e^{-st}", R"dt")
+eq2 = Tex(R"\\int_0^\\infty", R"e^{-st}", R"dt", R"=", R"\\frac{1}{s}")
+
+# TransformMatchingTex matches by tex content automatically
+self.play(TransformMatchingTex(eq1, eq2))
+
+# For more control, use TransformMatchingShapes with key_map
+eq3 = Tex(R"x^2 + 2x + 1")
+eq4 = Tex(R"(x+1)^2")
+self.play(TransformMatchingShapes(eq3, eq4))
+
+# Color-coded transformation
+t2c = {R"{s}": YELLOW, R"e": BLUE}  # tex-to-color map
+eq_colored = Tex(R"e^{-{s}t}", t2c=t2c)
+self.play(TransformMatchingTex(eq1.copy(), eq_colored))
+""",
+        math_concepts=["algebra", "equation", "derivation", "proof"],
+        keywords=["TransformMatchingTex", "TransformMatchingShapes", "equation", "morph", "t2c"],
+    ),
+
+    AnimationPattern(
+        name="interactive_slider",
+        category="updater",
+        description="""
+Add an interactive slider that controls a parameter. The slider displays
+the current value and can be animated. Great for exploring parameter spaces.
+""",
+        code_template="""
+# Create a value tracker for the parameter
+s_tracker = ValueTracker(1)
+
+# Create slider UI element
+s_slider = Slider(
+    s_tracker,
+    x_range=(0, 5, 0.1),  # min, max, step
+    var_name="s",  # displays as "s = 1.00"
+)
+s_slider.scale(1.5)
+s_slider.to_edge(UP)
+s_slider.fix_in_frame()  # Stays fixed even when camera moves
+
+self.add(s_slider)
+
+# Animate the slider
+self.play(s_tracker.animate.set_value(4), run_time=3)
+self.play(s_tracker.animate.set_value(0.5), run_time=2)
+
+# Other mobjects react to s_tracker via updaters
+graph.add_updater(lambda m: m.become(
+    axes.get_graph(lambda x: np.sin(s_tracker.get_value() * x))
+))
+""",
+        math_concepts=["parameter", "interactive", "exploration"],
+        keywords=["Slider", "ValueTracker", "fix_in_frame", "interactive", "parameter"],
+    ),
+
+    AnimationPattern(
+        name="decimal_number_counter",
+        category="updater",
+        description="""
+Animated number display that counts up/down smoothly. Use DecimalNumber
+with updaters for live-updating values. Essential for showing calculations.
+""",
+        code_template="""
+# Create a tracker for the value
+value_tracker = ValueTracker(0)
+
+# DecimalNumber that updates automatically
+decimal = DecimalNumber(0, num_decimal_places=2, font_size=72)
+decimal.add_updater(lambda m: m.set_value(value_tracker.get_value()))
+
+# Position it (can also add position updater)
+decimal.to_edge(UP)
+decimal.fix_in_frame()  # Optional: stays fixed during camera moves
+
+self.add(decimal)
+
+# Animate counting up
+self.play(value_tracker.animate.set_value(100), run_time=4, rate_func=linear)
+
+# For integers, use num_decimal_places=0
+integer_display = Integer(0)
+integer_display.add_updater(lambda m: m.set_value(int(value_tracker.get_value())))
+
+# Make changeable numbers in equations
+equation = Tex(R"\\int_0^{0.01} 1 \\, dt = 0.01", font_size=72)
+decimals = equation.make_number_changeable("0.01", replace_all=True)
+for dec in decimals:
+    dec.add_updater(lambda m: m.set_value(value_tracker.get_value()))
+""",
+        math_concepts=["counting", "calculation", "display"],
+        keywords=["DecimalNumber", "Integer", "make_number_changeable", "counter", "updater"],
+    ),
+
+    AnimationPattern(
+        name="fix_in_frame_ui",
+        category="camera",
+        description="""
+Keep UI elements (labels, equations, sliders) fixed in place even when
+the camera moves or zooms. Essential for educational animations where
+you need persistent annotations.
+""",
+        code_template="""
+# Create UI elements
+title = Text("Integration Demo").to_edge(UP)
+equation = Tex(R"\\int f(x) dx").to_corner(UR)
+slider = Slider(tracker, x_range=(0, 5)).to_edge(DOWN)
+
+# Fix them in the frame (won't move with camera)
+title.fix_in_frame()
+equation.fix_in_frame()
+slider.fix_in_frame()
+
+self.add(title, equation, slider)
+
+# Now camera can move freely without affecting UI
+self.play(
+    self.frame.animate.scale(0.5).move_to(detail_point),
+    run_time=2
+)
+# title, equation, slider stay in their screen positions!
+
+# To unfix:
+title.unfix_from_frame()
+""",
+        math_concepts=["visualization", "presentation", "ui"],
+        keywords=["fix_in_frame", "unfix_from_frame", "UI", "camera", "label"],
+    ),
+
+    AnimationPattern(
+        name="lagged_start_professional",
+        category="sequence",
+        description="""
+Professional staggered animations with precise timing control.
+Use LaggedStart with lag_ratio for cascading effects, and time_span
+for choreographed multi-part animations.
+""",
+        code_template="""
+# Basic LaggedStart - each starts before previous finishes
+items = VGroup(*[Square() for _ in range(5)]).arrange(RIGHT)
+self.play(LaggedStart(*[FadeIn(item, shift=UP) for item in items], lag_ratio=0.2))
+
+# LaggedStartMap - cleaner syntax for same animation on each item
+self.play(LaggedStartMap(FadeIn, items, lag_ratio=0.15))
+
+# Cascading with different animations
+self.play(LaggedStart(
+    ShowCreation(line1),
+    Write(label1),
+    ShowCreation(line2),
+    Write(label2),
+    lag_ratio=0.3
+))
+
+# Time spans for precise choreography in long animations
+self.play(
+    animation1,  # plays full duration
+    animation2.set_anim_args(time_span=(0, 2)),    # plays t=0 to t=2
+    animation3.set_anim_args(time_span=(1.5, 4)),  # plays t=1.5 to t=4
+    animation4.set_anim_args(time_span=(3, 5)),    # plays t=3 to t=5
+    run_time=5
+)
+""",
+        math_concepts=["animation", "timing", "sequence"],
+        keywords=["LaggedStart", "LaggedStartMap", "lag_ratio", "time_span", "choreography"],
+    ),
+
+    AnimationPattern(
+        name="always_redraw_dynamic",
+        category="updater",
+        description="""
+For complex objects that need complete reconstruction each frame,
+use always_redraw. Simpler than manual updaters for derived geometry.
+""",
+        code_template="""
+# Dot that moves along a path
+t_tracker = ValueTracker(0)
+dot = Dot(color=YELLOW)
+dot.add_updater(lambda m: m.move_to(axes.c2p(t_tracker.get_value(), 0)))
+
+# Tangent line that's always redrawn based on dot position
+tangent = always_redraw(lambda: axes.get_secant_slope_group(
+    x=t_tracker.get_value(),
+    graph=graph,
+    dx=0.01,
+    secant_line_length=3,
+))
+
+# Vertical line from x-axis to curve
+v_line = always_redraw(lambda: Line(
+    axes.c2p(t_tracker.get_value(), 0),
+    axes.c2p(t_tracker.get_value(), func(t_tracker.get_value())),
+    color=YELLOW
+))
+
+# Area that changes with upper bound
+area = always_redraw(lambda: axes.get_area_under_graph(
+    graph,
+    x_range=[0, t_tracker.get_value()],
+    fill_opacity=0.5
+))
+
+self.add(dot, tangent, v_line, area)
+self.play(t_tracker.animate.set_value(4), run_time=5)
+""",
+        math_concepts=["calculus", "geometry", "dynamic"],
+        keywords=["always_redraw", "dynamic", "tangent", "derivative", "area"],
+    ),
+
+    AnimationPattern(
+        name="traced_path_trajectory",
+        category="updater",
+        description="""
+Draw the path that a moving object traces. Perfect for showing
+trajectories, parametric curves being drawn, or phase space orbits.
+""",
+        code_template="""
+# Moving dot controlled by tracker
+t_tracker = ValueTracker(0)
+dot = Dot(color=YELLOW)
+dot.add_updater(lambda m: m.move_to(
+    axes.c2p(np.cos(t_tracker.get_value()), np.sin(t_tracker.get_value()))
+))
+
+# TracedPath follows the dot and draws its trail
+trace = TracedPath(
+    dot.get_center,
+    stroke_color=BLUE,
+    stroke_width=3,
+    stroke_opacity=[0, 1],  # Fades in (gradient)
+)
+
+# Or with fading trail
+fading_trace = TracedPath(
+    dot.get_center,
+    stroke_color=BLUE,
+    stroke_width=2,
+    dissipating_time=0.5,  # Trail fades after 0.5 seconds
+)
+
+self.add(dot, trace)
+self.play(t_tracker.animate.set_value(2 * PI), run_time=4, rate_func=linear)
+""",
+        math_concepts=["parametric", "trajectory", "phase space", "orbit"],
+        keywords=["TracedPath", "trajectory", "trail", "path", "parametric"],
+    ),
+
+    AnimationPattern(
+        name="transform_from_copy",
+        category="transform",
+        description="""
+Create a copy of one object and transform it into another.
+Useful for showing derivations where the original stays in place.
+""",
+        code_template="""
+# Original equation stays in place
+original = Tex(R"e^{i\\pi}").to_edge(UP)
+result = Tex(R"= -1").next_to(original, RIGHT)
+
+self.play(Write(original))
+
+# Transform a COPY into the result (original stays)
+self.play(TransformFromCopy(original, result))
+
+# Multiple copies spreading out
+source = Tex(R"f(x)")
+targets = VGroup(*[
+    Tex(text).move_to(pos)
+    for text, pos in [("f'(x)", UP), ("\\int f", DOWN), ("f^{-1}", RIGHT)]
+])
+
+self.play(LaggedStart(*[
+    TransformFromCopy(source, target)
+    for target in targets
+], lag_ratio=0.3))
+""",
+        math_concepts=["transformation", "derivation", "copy"],
+        keywords=["TransformFromCopy", "copy", "derivation", "spread"],
+    ),
+
+    AnimationPattern(
+        name="indicate_and_flash",
+        category="highlight",
+        description="""
+Draw attention to specific elements with indication animations.
+3b1b uses these to guide viewer focus during explanations.
+""",
+        code_template="""
+# Indicate - scales up and changes color temporarily
+self.play(Indicate(equation, color=YELLOW, scale_factor=1.2))
+
+# FlashAround - draws attention with animated border
+self.play(FlashAround(important_region, color=YELLOW, stroke_width=4))
+
+# Circumscribe - draws a shape around the object
+self.play(Circumscribe(equation, color=RED, shape=Rectangle))
+
+# ShowPassingFlash - light travels along a path
+self.play(ShowPassingFlash(
+    curve.copy().set_stroke(YELLOW, 5),
+    time_width=0.3,
+    run_time=2
+))
+
+# Wiggle - shakes object for emphasis
+self.play(Wiggle(wrong_answer, scale_value=1.1, rotation_angle=0.05))
+
+# ApplyWave - wave passes through object
+self.play(ApplyWave(text, amplitude=0.3))
+
+# Flash - quick flash at a point
+self.play(Flash(point, color=WHITE, flash_radius=0.5))
+""",
+        math_concepts=["visualization", "emphasis", "attention"],
+        keywords=["Indicate", "FlashAround", "Circumscribe", "ShowPassingFlash", "highlight"],
+    ),
+
+    AnimationPattern(
+        name="number_line_with_tracker",
+        category="updater",
+        description="""
+Animated number line with a moving indicator. Classic 3b1b style
+for showing values changing on a scale.
+""",
+        code_template="""
+# Create number line
+number_line = NumberLine(x_range=[-3, 3, 1], length=10, include_numbers=True)
+
+# Value tracker
+x_tracker = ValueTracker(0)
+
+# Dot on the number line
+dot = Dot(color=YELLOW)
+dot.add_updater(lambda m: m.move_to(number_line.n2p(x_tracker.get_value())))
+
+# Label showing value
+label = DecimalNumber(0, num_decimal_places=2)
+label.add_updater(lambda m: m.set_value(x_tracker.get_value()))
+label.add_updater(lambda m: m.next_to(dot, UP))
+
+# Triangle pointer
+pointer = Triangle(fill_opacity=1, fill_color=YELLOW).scale(0.2)
+pointer.add_updater(lambda m: m.next_to(dot, DOWN, buff=0))
+
+self.add(number_line, dot, label, pointer)
+self.play(x_tracker.animate.set_value(2), run_time=2)
+self.play(x_tracker.animate.set_value(-1.5), run_time=2)
+""",
+        math_concepts=["number line", "value", "scale"],
+        keywords=["NumberLine", "ValueTracker", "n2p", "pointer", "indicator"],
+    ),
+
+    AnimationPattern(
+        name="riemann_sum_reactive",
+        category="updater",
+        description="""
+ADVANCED Riemann sum with reactive rectangles. The number of rectangles
+updates smoothly as a parameter changes. This is the professional 3b1b style.
+""",
+        code_template="""
+# Tracker for number of rectangles (can be continuous!)
+n_tracker = ValueTracker(4)
+
+# Reactive rectangles using always_redraw
+rects = always_redraw(lambda: axes.get_riemann_rectangles(
+    graph,
+    x_range=[a, b],
+    dx=(b - a) / max(1, n_tracker.get_value()),
+    colors=[BLUE, GREEN],
+    fill_opacity=0.7,
+))
+
+# Label showing current n
+n_label = always_redraw(lambda: Tex(
+    f"n = {int(n_tracker.get_value())}"
+).to_corner(UR))
+
+# Sum approximation
+sum_value = always_redraw(lambda: DecimalNumber(
+    sum(func(a + i * (b-a)/n_tracker.get_value()) * (b-a)/n_tracker.get_value()
+        for i in range(int(n_tracker.get_value()))),
+    num_decimal_places=3
+).to_corner(DR))
+
+self.add(rects, n_label, sum_value)
+
+# Smooth animation from 4 to 64 rectangles
+self.play(n_tracker.animate.set_value(64), run_time=6, rate_func=linear)
+
+# Can also use discrete steps
+for n in [4, 8, 16, 32]:
+    self.play(n_tracker.animate.set_value(n), run_time=1)
+    self.wait(0.5)
+""",
+        math_concepts=["integral", "riemann sum", "calculus", "approximation"],
+        keywords=["always_redraw", "get_riemann_rectangles", "reactive", "n_tracker"],
+    ),
 ]
 
 
@@ -4542,23 +5070,31 @@ def detect_pattern_from_prompt(prompt: str) -> list[AnimationPattern]:
         "riemann_sum_convergence": ["riemann", "rectangles", "approximate area", "integral approximation", "sum converge"],
         "series_partial_sums": ["series", "partial sum", "convergence", "infinite sum"],
 
-        # Transform patterns
-        "equation_transformation": ["equation", "algebraic", "rearrange", "simplify"],
+        # Transform patterns (ADVANCED 3B1B STYLE)
+        "transform_matching_tex": ["equation morph", "equation transform", "algebraic", "rearrange", "simplify", "derivation"],
+        "transform_from_copy": ["copy and transform", "derivation", "original stays", "spread out"],
         "morph_graph_to_graph": ["morph", "transform graph", "change function"],
 
-        # Updater patterns
-        "value_tracker_animation": ["continuous", "smooth", "parameter", "slider", "dynamic"],
-        "always_redraw_dynamic": ["redraw", "dynamic object", "updating"],
+        # Updater patterns (ADVANCED 3B1B STYLE - prioritize these!)
+        "value_tracker_reactive": ["continuous", "smooth", "parameter", "slider", "dynamic", "animate", "change", "varying", "moving"],
+        "reactive_area_integral": ["area under", "integral", "area changes", "accumulate", "shade"],
+        "always_redraw_dynamic": ["redraw", "dynamic object", "updating", "depends on", "follows"],
+        "traced_path_trajectory": ["trajectory", "trace", "path", "trail", "orbit", "follows path"],
+        "decimal_number_counter": ["counter", "counting", "display value", "show number", "numerical"],
+        "number_line_with_tracker": ["number line", "scale", "indicator", "value on line"],
+        "riemann_sum_reactive": ["riemann", "rectangles converge", "dx", "n rectangles"],
 
-        # Sequence patterns
-        "lagged_start_reveal": ["one by one", "staggered", "sequence", "reveal"],
+        # Sequence patterns (ADVANCED 3B1B STYLE)
+        "lagged_start_professional": ["one by one", "staggered", "sequence", "reveal", "cascade", "choreograph"],
         "build_up_construction": ["step by step", "construct", "build up"],
+        "interactive_slider": ["slider", "interactive", "explore parameter", "adjust"],
 
-        # Camera patterns
-        "zoom_to_detail": ["zoom", "close up", "detail", "magnify"],
+        # Camera patterns (ADVANCED 3B1B STYLE)
+        "camera_reorient_zoom": ["zoom", "close up", "detail", "magnify", "pan", "camera", "focus on"],
+        "fix_in_frame_ui": ["ui", "fixed label", "persistent", "annotation stays"],
 
-        # Highlight patterns
-        "indicate_with_flash": ["highlight", "flash", "emphasize", "attention"],
+        # Highlight patterns (ADVANCED 3B1B STYLE)
+        "indicate_and_flash": ["highlight", "flash", "emphasize", "attention", "indicate", "circumscribe", "wiggle"],
 
         # Calculus patterns
         "tangent_line_animation": ["tangent", "derivative", "slope at point", "instantaneous"],
