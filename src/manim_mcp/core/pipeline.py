@@ -842,9 +842,9 @@ The timing and visuals must sync with this script."""
     async def _mix_audio_video(self, video_path: str, audio_path: str) -> str:
         """Mix audio track into video using ffmpeg.
 
-        Uses the LONGER of video/audio duration to avoid clipping either:
-        - If audio is longer: loops video to match audio length
-        - If video is longer: pads audio with silence
+        Handles duration mismatch without looping:
+        - If audio is longer: freeze on last frame until audio ends
+        - If video is longer: pad audio with silence
 
         Args:
             video_path: Path to the rendered video
@@ -872,21 +872,24 @@ The timing and visuals must sync with this script."""
             video_path, video_duration, audio_path, audio_duration, output_path
         )
 
-        # Use filter_complex to handle duration mismatch
-        # - Loop video if audio is longer
+        # Handle duration mismatch - NEVER loop
+        # - Freeze last frame if audio is longer
         # - Pad audio with silence if video is longer
         if audio_duration > video_duration and video_duration > 0:
-            # Audio is longer: loop video to match audio duration
-            loop_count = int(audio_duration / video_duration) + 1
-            logger.info("Looping video %dx to match audio duration", loop_count)
+            # Audio is longer: freeze on last frame (tpad with stop_mode=clone)
+            pad_duration = audio_duration - video_duration
+            logger.info("Freezing last frame for %.1fs to match audio duration", pad_duration)
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y",
-                "-stream_loop", str(loop_count - 1),
                 "-i", video_path,
                 "-i", audio_path,
+                "-filter_complex",
+                f"[0:v]tpad=stop_mode=clone:stop_duration={pad_duration}[v]",
+                "-map", "[v]",
+                "-map", "1:a",
                 "-c:v", "libx264", "-preset", "fast",
                 "-c:a", "aac",
-                "-t", str(audio_duration),  # Trim to exact audio duration
+                "-shortest",
                 output_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,

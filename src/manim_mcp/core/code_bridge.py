@@ -258,6 +258,10 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"\s*self\.add_tips\s*\([^)]*\)\s*\n?", "\n"),
         # Remove Circumscribe (CE only) - replace with Indicate
         (r"\bCircumscribe\s*\(", "Indicate("),
+        # Color spelling: CE uses American GRAY, manimgl uses British GREY
+        (r"\bGRAY\b", "GREY"),
+        (r"\bLIGHT_GRAY\b", "LIGHT_GREY"),
+        (r"\bDARK_GRAY\b", "DARK_GREY"),
     ]
     for pattern, replacement in post_replacements:
         if re.search(pattern, code):
