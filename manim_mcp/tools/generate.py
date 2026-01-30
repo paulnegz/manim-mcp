@@ -20,13 +20,15 @@ def register_generate_tools(mcp: FastMCP) -> None:
     async def generate_animation(
         ctx: Context,
         prompt: str,
-        quality: str = "medium",
+        quality: str = "low",
         format: str = "mp4",
         resolution: str | None = None,
         fps: int | None = None,
         background_color: str | None = None,
         transparent: bool = False,
         save_last_frame: bool = False,
+        audio: bool = True,
+        voice: str | None = None,
     ) -> dict:
         """Create a Manim animation from a text description.
 
@@ -42,6 +44,8 @@ def register_generate_tools(mcp: FastMCP) -> None:
             background_color: Background color hex (e.g. '#000000').
             transparent: Transparent background (for png/gif).
             save_last_frame: Save last frame as image instead of video.
+            audio: Generate audio narration for the animation (default: True).
+            voice: TTS voice (Puck, Charon, Kore, Fenrir, Aoede, etc.).
 
         Returns:
             Animation result with video URL, render ID (for editing), and generated source code.
@@ -72,11 +76,18 @@ def register_generate_tools(mcp: FastMCP) -> None:
                 background_color=background_color,
                 transparent=transparent,
                 save_last_frame=save_last_frame,
+                audio=audio,
+                voice=voice,
             )
-            # Use advanced pipeline with RAG for better code generation
-            result = await app.pipeline.generate_advanced(
-                prompt=prompt, params=params, progress_callback=progress_callback
-            )
+            # Use simple or advanced pipeline based on config
+            if app.config.agent_mode == "advanced":
+                result = await app.pipeline.generate_advanced(
+                    prompt=prompt, params=params, progress_callback=progress_callback
+                )
+            else:
+                result = await app.pipeline.generate(
+                    prompt=prompt, params=params, progress_callback=progress_callback
+                )
             await ctx.report_progress(100, 100)
 
             elapsed = time.time() - start_time
@@ -101,13 +112,15 @@ def register_generate_tools(mcp: FastMCP) -> None:
         ctx: Context,
         render_id: str,
         instructions: str,
-        quality: str = "medium",
+        quality: str = "low",
         format: str = "mp4",
         resolution: str | None = None,
         fps: int | None = None,
         background_color: str | None = None,
         transparent: bool = False,
         save_last_frame: bool = False,
+        audio: bool = True,
+        voice: str | None = None,
     ) -> dict:
         """Edit an existing animation by describing what to change.
 
@@ -124,6 +137,8 @@ def register_generate_tools(mcp: FastMCP) -> None:
             background_color: Background color hex (e.g. '#000000').
             transparent: Transparent background.
             save_last_frame: Save last frame as image instead of video.
+            audio: Generate audio narration for the animation (default: True).
+            voice: TTS voice (Puck, Charon, Kore, Fenrir, Aoede, etc.).
 
         Returns:
             New animation result with updated video URL and new render ID.
@@ -154,6 +169,8 @@ def register_generate_tools(mcp: FastMCP) -> None:
                 background_color=background_color,
                 transparent=transparent,
                 save_last_frame=save_last_frame,
+                audio=audio,
+                voice=voice,
             )
             result = await app.pipeline.edit(
                 render_id=render_id,

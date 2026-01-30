@@ -462,6 +462,138 @@ ERROR_PATTERNS = [
         "fix": "Use .arrange() instead of .arrange_submobjects() in manimgl",
         "example": "group.arrange(DOWN, buff=0.5)",
     },
+    {
+        "pattern": "FadeOut(",
+        "method": None,
+        "fix": "In manimgl, FadeOut() only accepts ONE mobject. For multiple mobjects, wrap them in VGroup: FadeOut(VGroup(a, b, c)) instead of FadeOut(a, b, c). The extra args in manimgl become keyword arguments like shift=, which causes 'operands could not be broadcast' errors.",
+        "example": "self.play(FadeOut(VGroup(label1, label2, label3)))  # NOT FadeOut(label1, label2, label3)",
+    },
+    {
+        "pattern": "FadeIn(",
+        "method": None,
+        "fix": "In manimgl, FadeIn() only accepts ONE mobject. For multiple mobjects, wrap them in VGroup: FadeIn(VGroup(a, b, c)) instead of FadeIn(a, b, c).",
+        "example": "self.play(FadeIn(VGroup(obj1, obj2)))  # NOT FadeIn(obj1, obj2)",
+    },
+    {
+        "pattern": "operands could not be broadcast",
+        "method": None,
+        "fix": "This numpy error often means you passed a mobject where manimgl expected a vector. Common cause: FadeOut(a, b, c) where the extra mobjects get interpreted as shift vectors. Use FadeOut(VGroup(a, b, c)) instead.",
+        "example": "self.play(FadeOut(VGroup(mob1, mob2, mob3)))  # Wrap in VGroup",
+    },
+    # === CE-ONLY ANIMATION ERRORS ===
+    {
+        "pattern": "Circumscribe",
+        "method": None,
+        "fix": "Circumscribe is CE-only. In manimgl, use Indicate() or FlashAround() instead.",
+        "example": "self.play(Indicate(mobject))  # Instead of Circumscribe",
+    },
+    {
+        "pattern": "SpiralIn",
+        "method": None,
+        "fix": "SpiralIn is CE-only. In manimgl, use GrowFromCenter() or GrowFromPoint() instead.",
+        "example": "self.play(GrowFromCenter(mobject))  # Instead of SpiralIn",
+    },
+    {
+        "pattern": "AddTextLetterByLetter",
+        "method": None,
+        "fix": "AddTextLetterByLetter is CE-only. In manimgl, use Write() instead.",
+        "example": "self.play(Write(text))  # Instead of AddTextLetterByLetter",
+    },
+    {
+        "pattern": "Blink",
+        "method": None,
+        "fix": "Blink is CE-only. In manimgl, use VFadeIn/VFadeOut or create a custom animation.",
+        "example": "self.play(VFadeOut(mob), VFadeIn(mob))  # Approximate blink effect",
+    },
+    # === IMPORT ERRORS ===
+    {
+        "pattern": "cannot import name 'Create'",
+        "method": None,
+        "fix": "manimgl uses ShowCreation instead of Create. Change 'Create' to 'ShowCreation'.",
+        "example": "from manimlib import *  # then use ShowCreation(mobject)",
+    },
+    {
+        "pattern": "cannot import name 'MathTex'",
+        "method": None,
+        "fix": "manimgl uses Tex instead of MathTex. Change 'MathTex' to 'Tex'.",
+        "example": "formula = Tex(r'\\int_a^b f(x) dx')",
+    },
+    # === ATTRIBUTE ERRORS ===
+    {
+        "pattern": "has no attribute 'plot'",
+        "method": None,
+        "fix": "manimgl uses get_graph() instead of plot(). Change axes.plot() to axes.get_graph().",
+        "example": "graph = axes.get_graph(lambda x: x**2)",
+    },
+    {
+        "pattern": "has no attribute 'add_coordinates'",
+        "method": None,
+        "fix": "manimgl uses add_coordinate_labels() instead of add_coordinates().",
+        "example": "axes.add_coordinate_labels()",
+    },
+    {
+        "pattern": "has no attribute 'get_area'",
+        "method": None,
+        "fix": "manimgl uses get_area_under_graph() instead of get_area().",
+        "example": "area = axes.get_area_under_graph(graph, x_range=[0, 2])",
+    },
+    # === PARAMETER ERRORS ===
+    {
+        "pattern": "unexpected keyword argument 'tips'",
+        "method": "Axes",
+        "fix": "manimgl Axes doesn't have a 'tips' parameter. Remove it.",
+        "example": "Axes(x_range=[-3, 3], y_range=[-2, 2])  # No tips parameter",
+    },
+    {
+        "pattern": "unexpected keyword argument 'x_length'",
+        "method": "Axes",
+        "fix": "manimgl uses 'width' instead of 'x_length' for Axes.",
+        "example": "Axes(x_range=[-3, 3], y_range=[-2, 2], width=10)",
+    },
+    {
+        "pattern": "unexpected keyword argument 'y_length'",
+        "method": "Axes",
+        "fix": "manimgl uses 'height' instead of 'y_length' for Axes.",
+        "example": "Axes(x_range=[-3, 3], y_range=[-2, 2], height=6)",
+    },
+    {
+        "pattern": "unexpected keyword argument 'target_position'",
+        "method": None,
+        "fix": "manimgl FadeIn/FadeOut doesn't support 'target_position'. Use 'shift' parameter instead.",
+        "example": "FadeIn(mob, shift=UP)  # Instead of target_position",
+    },
+    # === TYPE ERRORS ===
+    {
+        "pattern": "takes 1 positional argument but",
+        "method": None,
+        "fix": "Many manimgl animations only accept ONE mobject. Wrap multiple mobjects in VGroup().",
+        "example": "FadeOut(VGroup(mob1, mob2))  # NOT FadeOut(mob1, mob2)",
+    },
+    {
+        "pattern": "'Mobject' object is not subscriptable",
+        "method": None,
+        "fix": "You're trying to index a Mobject directly. Use .submobjects[i] or store submobjects in a list.",
+        "example": "parts = VGroup(*[...])  # Then access parts[0], parts[1], etc.",
+    },
+    # === RUNTIME ERRORS ===
+    {
+        "pattern": "GREY",
+        "method": None,
+        "fix": "manimgl uses British spelling GREY, not American GRAY.",
+        "example": "circle.set_color(GREY)  # Not GRAY",
+    },
+    {
+        "pattern": "DEGREES",
+        "method": None,
+        "fix": "manimgl uses DEG, not DEGREES for angle units.",
+        "example": "angle = 45 * DEG  # Not 45 * DEGREES",
+    },
+    {
+        "pattern": "ThreeDScene",
+        "method": None,
+        "fix": "manimgl doesn't have ThreeDScene. Use regular Scene - 3D is automatic with 3D objects.",
+        "example": "class MyScene(Scene):  # Not ThreeDScene",
+    },
 ]
 
 
