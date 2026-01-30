@@ -842,6 +842,10 @@ The timing and visuals must sync with this script."""
     async def _mix_audio_video(self, video_path: str, audio_path: str) -> str:
         """Mix audio track into video using ffmpeg.
 
+        Uses the LONGER of video/audio duration to avoid clipping either:
+        - If audio is longer: loops video to match audio length
+        - If video is longer: pads audio with silence
+
         Args:
             video_path: Path to the rendered video
             audio_path: Path to the audio narration
@@ -859,19 +863,50 @@ The timing and visuals must sync with this script."""
             base, ext = os.path.splitext(video_path)
             output_path = f"{base}_with_audio{ext}"
 
-        logger.info("Mixing audio into video: %s + %s -> %s", video_path, audio_path, output_path)
+        # Get durations of both streams
+        video_duration = await self._get_media_duration(video_path)
+        audio_duration = await self._get_media_duration(audio_path)
 
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-i", audio_path,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-shortest",  # End when shortest stream ends
-            output_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+        logger.info(
+            "Mixing audio into video: %s (%.1fs) + %s (%.1fs) -> %s",
+            video_path, video_duration, audio_path, audio_duration, output_path
         )
+
+        # Use filter_complex to handle duration mismatch
+        # - Loop video if audio is longer
+        # - Pad audio with silence if video is longer
+        if audio_duration > video_duration and video_duration > 0:
+            # Audio is longer: loop video to match audio duration
+            loop_count = int(audio_duration / video_duration) + 1
+            logger.info("Looping video %dx to match audio duration", loop_count)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y",
+                "-stream_loop", str(loop_count - 1),
+                "-i", video_path,
+                "-i", audio_path,
+                "-c:v", "libx264", "-preset", "fast",
+                "-c:a", "aac",
+                "-t", str(audio_duration),  # Trim to exact audio duration
+                output_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        else:
+            # Video is longer or equal: pad audio with silence
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-i", audio_path,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-filter_complex", f"[1:a]apad=whole_dur={video_duration}[a]",
+                "-map", "0:v",
+                "-map", "[a]",
+                output_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
         _, stderr = await proc.communicate()
 
         if proc.returncode != 0:
@@ -880,3 +915,20 @@ The timing and visuals must sync with this script."""
 
         logger.info("Audio mixed successfully: %s", output_path)
         return output_path
+
+    async def _get_media_duration(self, path: str) -> float:
+        """Get duration of a media file using ffprobe."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            return float(stdout.decode().strip())
+        except Exception as e:
+            logger.warning("Failed to get duration for %s: %s", path, e)
+            return 0.0

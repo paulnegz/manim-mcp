@@ -56,35 +56,68 @@ class BaseAgent(ABC):
         prompt: str,
         system: str,
     ) -> str:
-        """Make an LLM call with the given prompt and system instruction."""
-        from google import genai
+        """Make an LLM call with the given prompt and system instruction.
 
-        response = await self.llm.client.aio.models.generate_content(
-            model=self.llm.model_name,
-            contents=prompt,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=system,
-            ),
-        )
-        return response.text.strip()
+        Uses the provider-agnostic LLM client abstraction.
+        """
+        from manim_mcp.core.llm import GeminiClient, ClaudeClient
+
+        if isinstance(self.llm, GeminiClient):
+            from google import genai
+            response = await self.llm.client.aio.models.generate_content(
+                model=self.llm.model_name,
+                contents=prompt,
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=system,
+                ),
+            )
+            return response.text.strip()
+        elif isinstance(self.llm, ClaudeClient):
+            response = await self.llm.client.messages.create(
+                model=self.llm.model_name,
+                max_tokens=8192,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text.strip()
+        else:
+            raise ValueError(f"Unknown LLM client type: {type(self.llm)}")
 
     async def _llm_call_json(
         self,
         prompt: str,
         system: str,
     ) -> dict:
-        """Make an LLM call expecting JSON output."""
-        from google import genai
+        """Make an LLM call expecting JSON output.
 
-        response = await self.llm.client.aio.models.generate_content(
-            model=self.llm.model_name,
-            contents=prompt,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=system,
-                response_mime_type="application/json",
-            ),
-        )
-        text = response.text.strip()
+        Uses the provider-agnostic LLM client abstraction.
+        """
+        from manim_mcp.core.llm import GeminiClient, ClaudeClient
+
+        if isinstance(self.llm, GeminiClient):
+            from google import genai
+            response = await self.llm.client.aio.models.generate_content(
+                model=self.llm.model_name,
+                contents=prompt,
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=system,
+                    response_mime_type="application/json",
+                ),
+            )
+            text = response.text.strip()
+        elif isinstance(self.llm, ClaudeClient):
+            # Claude doesn't support response_mime_type, so we add JSON instruction
+            json_system = f"{system}\n\nIMPORTANT: Respond ONLY with valid JSON, no markdown fences."
+            response = await self.llm.client.messages.create(
+                model=self.llm.model_name,
+                max_tokens=8192,
+                system=json_system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+        else:
+            raise ValueError(f"Unknown LLM client type: {type(self.llm)}")
+
         return self._parse_json(text)
 
     def _parse_json(self, text: str) -> dict:

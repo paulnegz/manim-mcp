@@ -57,6 +57,7 @@ RUN pip install --no-cache-dir \
     chromadb \
     sentence-transformers \
     google-genai \
+    anthropic \
     mcp \
     pydantic \
     pydantic-settings \
