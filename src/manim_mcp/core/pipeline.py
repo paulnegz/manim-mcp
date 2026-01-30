@@ -104,13 +104,22 @@ class AnimationPipeline:
         try:
             # 0. Generate narration script FIRST if audio requested (for code-audio sync)
             narration_script = None
+            audio_task = None
             if params.audio and self.tts:
                 await report("generating", 3)
                 logger.info("Generating narration script first for code-audio sync")
                 narration_script = await self.tts.generate_narration_script(prompt)
                 logger.info("Generated %d-sentence narration script", len(narration_script))
 
+                # Start TTS generation in parallel with code generation
+                # TTS internally parallelizes across sentences
+                audio_task = asyncio.create_task(
+                    self._generate_audio_from_script(narration_script, render_id, params.voice)
+                )
+                logger.info("Started parallel TTS generation")
+
             # 1. Generate code via LLM, guided by narration script (0-20%)
+            # Runs in parallel with TTS if audio requested
             await report("generating", 5)
             await self.tracker.update_render(render_id, status=RenderStatus.generating)
             await report("generating", 10)
@@ -125,18 +134,18 @@ class AnimationPipeline:
             )
             await report("preparing", 25)
 
-            # 3. Render + upload with retry on runtime errors (25-60%)
+            # 3. Render video (25-60%)
             await report("rendering", 30)
             result = await self._render_with_retries(render_id, code, scene_name, params, prompt)
             await report("uploading", 60)
 
-            # 4. Generate audio narration if requested (60-90%)
+            # 4. Wait for parallel TTS and mix audio (60-90%)
             has_audio = False
-            if params.audio and result.local_path:
+            if audio_task and result.local_path:
                 try:
                     await report("generating_audio", 65)
-                    # Use the pre-generated script for perfect code-audio sync
-                    audio_path = await self._generate_audio(prompt, render_id, params.voice, narration_script)
+                    # Await the parallel TTS task
+                    audio_path = await audio_task
                     await report("mixing_audio", 80)
                     if audio_path:
                         mixed_path = await self._mix_audio_video(
@@ -231,13 +240,22 @@ class AnimationPipeline:
         try:
             # 0. Generate narration script FIRST if audio requested (for code-audio sync)
             narration_script = None
+            audio_task = None
             if params.audio and self.tts:
                 await report("generating", 3)
                 logger.info("Generating narration script first for code-audio sync")
                 narration_script = await self.tts.generate_narration_script(prompt)
                 logger.info("Generated %d-sentence narration script", len(narration_script))
 
+                # Start TTS generation in parallel with code generation
+                # TTS internally parallelizes across sentences
+                audio_task = asyncio.create_task(
+                    self._generate_audio_from_script(narration_script, render_id, params.voice)
+                )
+                logger.info("Started parallel TTS generation")
+
             # 1. Run multi-agent pipeline (0-20%)
+            # Runs in parallel with TTS if audio requested
             await report("analyzing", 5)
             await self.tracker.update_render(render_id, status=RenderStatus.generating)
             await report("planning", 10)
@@ -257,18 +275,18 @@ class AnimationPipeline:
             )
             await report("preparing", 25)
 
-            # 4. Render + upload (25-60%)
+            # 4. Render video (25-60%)
             await report("rendering", 30)
             result = await self._render_and_upload(render_id, code, scene_name, params)
             await report("uploading", 60)
 
-            # 5. Generate audio narration if requested (60-90%)
+            # 5. Wait for parallel TTS and mix audio (60-90%)
             has_audio = False
-            if params.audio and result.local_path:
+            if audio_task and result.local_path:
                 try:
                     await report("generating_audio", 65)
-                    # Use the pre-generated script for perfect code-audio sync
-                    audio_path = await self._generate_audio(prompt, render_id, params.voice, narration_script)
+                    # Await the parallel TTS task
+                    audio_path = await audio_task
                     await report("mixing_audio", 80)
                     if audio_path:
                         mixed_path = await self._mix_audio_video(
@@ -759,6 +777,66 @@ The timing and visuals must sync with this script."""
         finally:
             # Restore original voice if overridden
             if voice:
+                self.tts.voice = original_voice
+
+    async def _generate_audio_from_script(
+        self, script: list[str], render_id: str, voice: str | None = None
+    ) -> str | None:
+        """Generate narration audio from a pre-generated script.
+
+        This is used for parallel TTS generation - the script is already
+        generated, so we skip script generation and go straight to TTS.
+        TTS internally parallelizes across sentences.
+
+        Args:
+            script: Pre-generated narration script (list of sentences)
+            render_id: Render ID for temp file naming
+            voice: Optional voice override
+
+        Returns:
+            Path to the generated WAV file, or None if TTS unavailable
+        """
+        if not self.tts:
+            logger.warning("TTS service not available, skipping audio generation")
+            return None
+
+        if not script:
+            logger.warning("No script provided for audio generation")
+            return None
+
+        # Override voice if specified
+        original_voice = None
+        if voice:
+            original_voice = self.tts.voice
+            self.tts.voice = voice
+
+        try:
+            logger.info("Generating audio from %d-sentence script (parallel TTS)", len(script))
+
+            # Generate audio for all sentences in parallel
+            audio_segments = await self.tts.generate_parallel(script)
+
+            successful = sum(1 for s in audio_segments if not isinstance(s, Exception))
+            logger.info("TTS completed: %d/%d sentences successful", successful, len(script))
+
+            # Stitch audio segments together
+            audio_data = self.tts.stitch_audio(audio_segments)
+
+            # Save to temp file
+            import tempfile
+            audio_dir = os.path.join(tempfile.gettempdir(), f"manim_mcp_{render_id}")
+            os.makedirs(audio_dir, exist_ok=True)
+            audio_path = os.path.join(audio_dir, "narration.wav")
+
+            with open(audio_path, "wb") as f:
+                f.write(audio_data)
+
+            logger.info("Audio narration saved to %s", audio_path)
+            return audio_path
+
+        finally:
+            # Restore original voice if overridden
+            if original_voice:
                 self.tts.voice = original_voice
 
     async def _mix_audio_video(self, video_path: str, audio_path: str) -> str:
