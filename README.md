@@ -23,7 +23,11 @@ Works as a **CLI tool**, an **LLM-powered agent**, or an **MCP server** for inte
 - **Multi-agent pipeline** - Concept analysis, scene planning, code generation, and code review
 - **Self-learning** - Stores error patterns and fixes for continuous improvement
 - **Multi-provider LLM** - Supports Google Gemini and Anthropic Claude
-- **Audio narration** - Optional TTS with Gemini voices
+- **Audio narration** - Narration-first pipeline ensures audio-video sync:
+  - Narration script generated first
+  - Code follows the script sequence
+  - TTS runs in parallel with code generation
+  - Each sentence TTS runs in parallel
 - **Parameter validation** - API signatures prevent invalid method calls
 
 ## Quick Start
@@ -73,6 +77,19 @@ MANIM_MCP_S3_BUCKET=manim-renders
 manim-mcp generate "Animate a matrix transformation showing rotation and scaling"
 manim-mcp gen "Visualize the central limit theorem" --quality high --format mp4
 ```
+
+### Generate with audio narration
+
+```bash
+manim-mcp gen "Introduction to linear algebra" --audio
+manim-mcp gen "Pythagorean theorem proof" --audio --voice Kore
+```
+
+Audio uses a **narration-first pipeline** for perfect sync:
+1. Narration script is generated first (6-10 sentences)
+2. Code generation follows the script (each `self.play()` = one sentence)
+3. TTS runs in parallel with code generation
+4. Audio is mixed into the final video
 
 ### Edit an existing animation
 
@@ -151,11 +168,38 @@ This starts:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
+│                      NARRATION-FIRST PIPELINE (with audio)                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   prompt ──► Generate Narration Script (6-10 sentences)                      │
+│                           │                                                  │
+│              ┌────────────┴────────────┐                                     │
+│              │                         │  PARALLEL                           │
+│              ▼                         ▼                                     │
+│   ┌──────────────────┐      ┌──────────────────┐                            │
+│   │  Code Generation │      │  TTS Generation  │                            │
+│   │  (follows script)│      │  (per sentence)  │                            │
+│   └────────┬─────────┘      └────────┬─────────┘                            │
+│            │                         │  PARALLEL                             │
+│            ▼                         ▼                                       │
+│      validated code            audio segments                                │
+│            │                         │                                       │
+│            ▼                         ▼                                       │
+│   ┌──────────────────┐      ┌──────────────────┐                            │
+│   │  Render Video    │      │  Stitch Audio    │                            │
+│   └────────┬─────────┘      └────────┬─────────┘                            │
+│            │                         │                                       │
+│            └────────────┬────────────┘                                       │
+│                         ▼                                                    │
+│                  Mix Audio + Video ──► S3 upload ──► URL                     │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
 │                           MULTI-AGENT PIPELINE                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │   prompt ──► ConceptAnalyzer ──► ScenePlanner ──► CodeGenerator ──► CodeReviewer
-│                    │                   │                │                │   │
 │                    │                   │                │                │   │
 │                    ▼                   ▼                ▼                ▼   │
 │              ┌─────────────────────────────────────────────────────────┐     │
@@ -175,7 +219,6 @@ This starts:
 │                                                                              │
 │   validated code ──► CodeSandbox ──► manimgl (xvfb) ──► S3 upload ──► URL   │
 │         │                                    │                               │
-│         │                                    │                               │
 │         ▼                                    ▼                               │
 │   ┌───────────┐                       ┌───────────────┐                     │
 │   │  SQLite   │                       │    MinIO/S3   │                     │
@@ -194,6 +237,7 @@ This starts:
 | **CodeGenerator** | Generates manimgl code using scenes, API signatures, and animation patterns |
 | **CodeReviewer** | Validates code quality and applies fixes |
 | **ParameterValidator** | Validates method parameters against API signatures |
+| **GeminiTTSService** | Parallel TTS with Gemini voices, generates narration script |
 | **ChromaDBService** | Vector similarity search across 5,300+ indexed documents |
 | **CodeSandbox** | AST-based security validation (blocks dangerous code) |
 | **ManimRenderer** | Executes manimgl with xvfb for headless rendering |
