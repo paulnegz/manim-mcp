@@ -12,7 +12,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="${PROJECT_DIR}/assets/test_videos"
-PROMPT="Introduction to linear algebra"
+PROMPT="Explain calculus from first principle"
 QUALITY="low"
 CONTAINER="manim-mcp-manim-mcp-1"
 

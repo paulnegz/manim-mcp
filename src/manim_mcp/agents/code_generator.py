@@ -288,8 +288,8 @@ class CodeGeneratorAgent(BaseAgent):
         prompt_lower = prompt.lower()
         if any(kw in prompt_lower for kw in ["riemann", "rectangles", "integral", "area under"]):
             query_parts.append("riemann_sum_convergence progression")
-        if any(kw in prompt_lower for kw in ["derivative", "tangent", "slope"]):
-            query_parts.append("tangent_line derivative calculus")
+        if any(kw in prompt_lower for kw in ["derivative", "tangent", "slope", "secant"]):
+            query_parts.append("derivative_definition secant tangent_line limit calculus")
         if any(kw in prompt_lower for kw in ["series", "sum", "convergence"]):
             query_parts.append("series partial_sums convergence")
         if any(kw in prompt_lower for kw in ["matrix", "transformation", "linear"]):
@@ -558,6 +558,20 @@ class CodeGeneratorAgent(BaseAgent):
                 "",
                 "DO NOT write static code with manual transforms between states!",
                 "DO write reactive code where mobjects update automatically!",
+                "",
+                "3B1B VISUAL STYLE REQUIREMENTS:",
+                "- ALWAYS use Dots to mark key points on curves/graphs",
+                "- For derivatives/tangents: add Dot at base point AND Dot at second point",
+                "- For secant lines: show BOTH intersection points with colored Dots",
+                "- For Riemann sums: add Dots at sample points on the curve",
+                "- Use color contrast: curve=BLUE, points=YELLOW/RED, lines=GREEN",
+                "- Moving points should use always_redraw() to stay on the curve",
+                "- Add subtle visual elements like dashed lines connecting key points",
+                "",
+                "LAYOUT (auto-fixed, but prefer these patterns):",
+                "- Use next_to(obj, direction, buff=0.2) for labels near objects",
+                "- Use VGroup().arrange(DOWN, buff=0.3) for multiple related items",
+                "- Prefer relative positioning over absolute (next_to > move_to)",
                 "",
                 "CRITICAL LATEX/TEX RULES:",
                 "- NEVER use '&' in TexText - it's a special character! Use 'and' instead",

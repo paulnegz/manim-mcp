@@ -253,6 +253,11 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"riemann_sum_type\s*=\s*['\"][^'\"]*['\"]\s*,\s*", ""),
         # 3D Scene class: CE uses ThreeDScene, manimgl uses Scene (3D is automatic with 3D objects)
         (r"class\s+(\w+)\s*\(\s*ThreeDScene\s*\)", r"class \1(Scene)"),
+        # Remove CE-only methods that don't exist in manimgl
+        (r"\s*\w+\.add_tips\s*\([^)]*\)\s*\n?", "\n"),  # axes.add_tips() doesn't exist
+        (r"\s*self\.add_tips\s*\([^)]*\)\s*\n?", "\n"),
+        # Remove Circumscribe (CE only) - replace with Indicate
+        (r"\bCircumscribe\s*\(", "Indicate("),
     ]
     for pattern, replacement in post_replacements:
         if re.search(pattern, code):
@@ -265,6 +270,9 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
 
     # Step 5: Handle 3D scene camera methods (CE → manimgl)
     code = _fix_3d_camera(code, transformations)
+
+    # Step 6: Fix LaTeX issues - mixed text+math in Tex should use TexText
+    code = _fix_latex_issues(code, transformations)
 
     return code, transformations
 
@@ -324,6 +332,52 @@ def _fix_riemann_colors(code: str, transformations: list[str]) -> str:
             code = re.sub(pattern, replacement, code)
             transformations.append(f"riemann-color-fix: color/fill_color → colors tuple")
             break  # Only apply one transformation
+
+    return code
+
+
+def _fix_latex_issues(code: str, transformations: list[str]) -> str:
+    """Fix common LaTeX issues in manimgl code.
+
+    Common issues:
+    - Tex() with mixed text+math should be TexText() or split
+    - Unescaped special characters in text mode
+    - Missing braces around \to, \infty, etc.
+    """
+    # Fix Tex with mixed content containing text words + math
+    # Pattern: Tex('word word $math$') -> TexText('word word $math$')
+    # Look for Tex( with text that contains spaces AND $...$
+    mixed_content_pattern = r"Tex\s*\(\s*['\"]([^'\"]*\s+[^'\"]*\$[^'\"]+\$[^'\"]*)['\"]"
+    if re.search(mixed_content_pattern, code):
+        code = re.sub(
+            r"Tex\s*\(\s*(['\"])([^'\"]*\s+[^'\"]*\$[^'\"]+\$[^'\"]*)\1",
+            r"TexText(\1\2\1",
+            code
+        )
+        transformations.append("latex-fix: Tex with mixed content → TexText")
+
+    # Fix common ellipsis issue: ... should be \ldots in math mode
+    # But only in Tex(), not TexText()
+    if "Tex(" in code and "..." in code:
+        # Replace ... with \ldots only inside Tex() calls, not TexText()
+        def fix_ellipsis(match):
+            content = match.group(0)
+            if "TexText" not in content:
+                return content.replace("...", r"\\ldots ")
+            return content
+        code = re.sub(r"Tex\s*\([^)]+\)", fix_ellipsis, code)
+        transformations.append("latex-fix: ... → \\ldots")
+
+    # Fix: Single $ in Tex should probably be $$ or removed
+    # Tex('text $x$ more') is problematic - use TexText instead
+    single_dollar_pattern = r"Tex\s*\(\s*['\"]([^'\"]*[^\\]\$[^$]+\$[^'\"]*)['\"]"
+    if re.search(single_dollar_pattern, code):
+        code = re.sub(
+            r"(Tex)\s*\(\s*(['\"])([^'\"]*[^\\]\$[^$]+\$[^'\"]*)\2",
+            r"TexText(\2\3\2",
+            code
+        )
+        transformations.append("latex-fix: Tex with inline math → TexText")
 
     return code
 
@@ -399,6 +453,15 @@ def bridge_code(code: str, validate_params: bool = True) -> str:
             logger.debug("[CODE-BRIDGE] param_validator not available, skipping validation")
         except Exception as e:
             logger.warning("[CODE-BRIDGE] Parameter validation failed: %s", e)
+
+    # Fix layout issues (3b1b patterns: buff on edges, collision avoidance)
+    try:
+        from manim_mcp.core.layout_validator import validate_and_fix_layout
+        code = validate_and_fix_layout(code)
+    except ImportError:
+        logger.debug("[CODE-BRIDGE] layout_validator not available, skipping")
+    except Exception as e:
+        logger.warning("[CODE-BRIDGE] Layout validation failed: %s", e)
 
     # Ensure proper import exists
     code = ensure_manimgl_import(code)
