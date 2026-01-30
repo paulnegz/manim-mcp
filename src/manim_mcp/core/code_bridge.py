@@ -251,6 +251,8 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"n_rects\s*=\s*\d+\s*,\s*", ""),
         (r",\s*riemann_sum_type\s*=\s*['\"][^'\"]*['\"]", ""),
         (r"riemann_sum_type\s*=\s*['\"][^'\"]*['\"]\s*,\s*", ""),
+        # 3D Scene class: CE uses ThreeDScene, manimgl uses Scene (3D is automatic with 3D objects)
+        (r"class\s+(\w+)\s*\(\s*ThreeDScene\s*\)", r"class \1(Scene)"),
     ]
     for pattern, replacement in post_replacements:
         if re.search(pattern, code):
@@ -261,7 +263,45 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
     # manimgl uses colors=(COLOR,) not color= or fill_color=
     code = _fix_riemann_colors(code, transformations)
 
+    # Step 5: Handle 3D scene camera methods (CE → manimgl)
+    code = _fix_3d_camera(code, transformations)
+
     return code, transformations
+
+
+def _fix_3d_camera(code: str, transformations: list[str]) -> str:
+    """Transform CE ThreeDScene camera methods to manimgl equivalents.
+
+    CE uses:
+        self.set_camera_orientation(phi=75*DEGREES, theta=30*DEGREES)
+        self.begin_ambient_camera_rotation(rate=0.1)
+
+    manimgl uses:
+        self.frame.reorient(phi, theta)  # or just remove, 3D auto-works
+    """
+    # Remove set_camera_orientation calls (manimgl handles 3D automatically)
+    # or transform to frame.reorient if we can parse the args
+    pattern = r"self\.set_camera_orientation\s*\(\s*phi\s*=\s*([^,]+)\s*,\s*theta\s*=\s*([^,\)]+)[^)]*\)"
+    if re.search(pattern, code):
+        # Transform to frame.reorient (simpler manimgl equivalent)
+        code = re.sub(pattern, r"self.frame.reorient(\1, \2)", code)
+        transformations.append("3d-camera: set_camera_orientation → frame.reorient")
+
+    # Remove other camera methods that don't have direct equivalents
+    remove_patterns = [
+        (r"self\.begin_ambient_camera_rotation\s*\([^)]*\)\s*\n?", ""),
+        (r"self\.stop_ambient_camera_rotation\s*\([^)]*\)\s*\n?", ""),
+        (r"self\.move_camera\s*\([^)]*\)\s*\n?", ""),
+        # Simple set_camera_orientation without named args
+        (r"self\.set_camera_orientation\s*\([^)]*\)\s*\n?", ""),
+    ]
+
+    for pattern, replacement in remove_patterns:
+        if re.search(pattern, code):
+            code = re.sub(pattern, replacement, code)
+            transformations.append(f"3d-camera: removed unsupported method")
+
+    return code
 
 
 def _fix_riemann_colors(code: str, transformations: list[str]) -> str:
