@@ -279,12 +279,12 @@ Return ONLY the narration text, one sentence per line.""",
         # Calculate pause duration to distribute between segments
         if len(valid_segments) > 1:
             available_pause_time = target_ms - total_audio_ms
-            pause_per_gap = max(200, min(2000, available_pause_time / (len(valid_segments) - 1)))
+            pause_per_gap = max(1300, min(2000, available_pause_time / (len(valid_segments) - 1)))
         else:
             pause_per_gap = 0
 
         # If audio is too long even with minimal pauses, speed it up
-        min_total = total_audio_ms + (len(valid_segments) - 1) * 200  # 200ms min pause
+        min_total = total_audio_ms + (len(valid_segments) - 1) * 1300  # 1300ms min pause
         if min_total > target_ms:
             # Need to speed up - calculate required factor (max 1.3x)
             speed_factor = min(1.3, min_total / target_ms)
@@ -300,7 +300,7 @@ Return ONLY the narration text, one sentence per line.""",
             total_audio_ms = sum(len(seg) for seg in valid_segments)
             if len(valid_segments) > 1:
                 available_pause_time = target_ms - total_audio_ms
-                pause_per_gap = max(200, available_pause_time / (len(valid_segments) - 1))
+                pause_per_gap = max(1300, available_pause_time / (len(valid_segments) - 1))
 
         # Build final audio with calculated pauses
         silence = AudioSegment.silent(duration=int(pause_per_gap))

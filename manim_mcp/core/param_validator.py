@@ -180,6 +180,24 @@ PARAM_FIXES = {
         "new_name": "big_tick_numbers",
         "message": "Use big_tick_numbers instead of numbers_with_elongated_ticks in manimgl.",
     },
+    # VMobject.set_stroke - common CE/manimgl parameter confusion
+    ("set_stroke", "background"): {
+        "action": "rename",
+        "new_name": "behind",
+        "message": "Use 'behind=True' instead of 'background=True' in manimgl set_stroke().",
+    },
+    # Also add for explicit class context
+    ("VMobject.set_stroke", "background"): {
+        "action": "rename",
+        "new_name": "behind",
+        "message": "Use 'behind=True' instead of 'background=True' in manimgl set_stroke().",
+    },
+    # Text/Tex stroke behind
+    ("Text", "stroke_behind"): {
+        "action": "rename",
+        "new_name": "behind",
+        "message": "Use 'behind=True' via set_stroke() instead of stroke_behind.",
+    },
 }
 
 
@@ -401,38 +419,55 @@ class ParameterValidator:
         Returns:
             ValidationIssue if the parameter is invalid, None if valid
         """
-        # Check if explicitly invalid (CE-only param)
-        if param_name in api_info.invalid_params:
-            # Try to find a suggested fix from hardcoded rules
-            fix_key = (method_name, param_name)
-            fix_info = PARAM_FIXES.get(fix_key, {})
+        # First, check hardcoded PARAM_FIXES (highest priority - known CE→manimgl mappings)
+        fix_key = (method_name, param_name)
+        fix_info = PARAM_FIXES.get(fix_key, {})
+        if not fix_info:
+            # Also try with full class.method name
+            fix_key_full = (api_info.full_name, param_name)
+            fix_info = PARAM_FIXES.get(fix_key_full, {})
 
+        if fix_info:
             return ValidationIssue(
                 method=method_name,
                 param=param_name,
                 issue_type="invalid_param" if fix_info.get("action") == "remove" else "wrong_param_name",
-                message=fix_info.get("message", f"Parameter '{param_name}' is not valid in manimgl {method_name}. CE-only parameter."),
+                message=fix_info.get("message", f"Parameter '{param_name}' is not valid in manimgl {method_name}."),
                 fix=fix_info.get("new_name"),
                 line_number=line_number,
             )
 
-        # If we have verified valid params list, check against it
-        if api_info.is_verified and api_info.valid_params:
-            if param_name not in api_info.valid_params:
-                # Unknown param - only flag if method is verified
-                # Check hardcoded rules for fix suggestion
-                fix_key = (method_name, param_name)
-                fix_info = PARAM_FIXES.get(fix_key, {})
+        # Check if explicitly invalid (CE-only param from RAG)
+        if param_name in api_info.invalid_params:
+            return ValidationIssue(
+                method=method_name,
+                param=param_name,
+                issue_type="invalid_param",
+                message=f"Parameter '{param_name}' is not valid in manimgl {method_name}. CE-only parameter.",
+                fix=None,
+                line_number=line_number,
+            )
 
-                if fix_info:
-                    return ValidationIssue(
-                        method=method_name,
-                        param=param_name,
-                        issue_type="invalid_param" if fix_info.get("action") == "remove" else "wrong_param_name",
-                        message=fix_info.get("message", f"Parameter '{param_name}' not found in manimgl {method_name}"),
-                        fix=fix_info.get("new_name"),
-                        line_number=line_number,
-                    )
+        # Check against valid params list (from parameter_names or valid_params)
+        # NOTE: Don't require is_verified - if we have valid_params, use them
+        if api_info.valid_params:
+            if param_name not in api_info.valid_params:
+                # Unknown param - not in the known valid params list
+                # Suggest similar param if exists
+                similar = None
+                for valid_p in api_info.valid_params:
+                    if param_name in valid_p or valid_p in param_name:
+                        similar = valid_p
+                        break
+
+                return ValidationIssue(
+                    method=method_name,
+                    param=param_name,
+                    issue_type="wrong_param_name",
+                    message=f"Parameter '{param_name}' not found in manimgl {method_name}. Valid params: {', '.join(sorted(api_info.valid_params)[:6])}",
+                    fix=similar,  # Suggest similar param if found
+                    line_number=line_number,
+                )
 
         return None
 

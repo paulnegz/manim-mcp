@@ -49,7 +49,7 @@ class RenderParams:
     save_last_frame: bool = False
     audio: bool = False
     voice: str | None = None
-    video_speed: float = 0.60  # Slow down video before mixing with audio (0.60 = 60% speed)
+    video_speed: float = 0.50  # Slow down video before mixing with audio (0.50 = 50% speed)
 
 
 class AnimationPipeline:
@@ -503,10 +503,14 @@ class AnimationPipeline:
         # Extract class/method names from error - handle multiple patterns
         # IMPORTANT: Order matters! More specific patterns (AttributeError, TypeError)
         # must come BEFORE generic patterns to avoid matching traceback lines like "sys.exit("
+        # NOTE: For TypeError with unexpected keyword, we need ClassName.method pattern
         patterns = [
             # Specific error patterns first
             r"'(\w+)' object has no attribute '(\w+)'",  # AttributeError - most specific
-            r"(\w+)\(\) got an unexpected keyword argument '(\w+)'",  # TypeError with method
+            # TypeError: ClassName.method() got an unexpected keyword argument 'param'
+            # Capture: group(1)=ClassName, group(2)=method, group(3)=invalid_param
+            r"(\w+)\.(\w+)\(\) got an unexpected keyword argument '(\w+)'",
+            r"(\w+)\(\) got an unexpected keyword argument '(\w+)'",  # TypeError with method only
             r"(\w+)\(.*unexpected.*argument.*'(\w+)'",  # unexpected argument variant
             r"(\w+)\.__init__\(\)",  # __init__ error
             # Generic pattern last (can match traceback noise like "sys.exit(")
@@ -515,12 +519,20 @@ class AnimationPipeline:
 
         class_name = None
         method_name = None
+        invalid_param = None
         for pattern in patterns:
             match = re.search(pattern, error_msg)
             if match:
-                class_name = match.group(1)
-                if match.lastindex >= 2:
+                if match.lastindex >= 3:
+                    # Pattern with ClassName.method(invalid_param)
+                    class_name = match.group(1)
                     method_name = match.group(2)
+                    invalid_param = match.group(3)
+                elif match.lastindex >= 2:
+                    class_name = match.group(1)
+                    method_name = match.group(2)
+                else:
+                    class_name = match.group(1)
                 break
 
         # If no specific pattern matched, try the generic one but filter out common false positives
@@ -534,24 +546,43 @@ class AnimationPipeline:
                     method_name = generic_match.group(2)
 
         if class_name:
-            logger.info("[RAG-RETRY] Looking up API for: %s", class_name)
-            sigs = await self.rag.search_api_signatures(class_name, n_results=2)
+            # Build search query: prefer ClassName.method if both available
+            search_query = f"{class_name}.{method_name}" if method_name else class_name
+            logger.info("[RAG-RETRY] Looking up API for: %s", search_query)
+            sigs = await self.rag.search_api_signatures(search_query, n_results=3)
             for sig in sigs:
-                params = sig.get("metadata", {}).get("parameters", "")
+                meta = sig.get("metadata", {})
+                # Try parameter_names first (from AST), then parameters
+                params = meta.get("parameter_names", "") or meta.get("parameters", "")
                 if params:
-                    hints.append(f"[API] {class_name} valid params: {params[:300]}")
-                    logger.info("[RAG-RETRY] Found API signature for %s", class_name)
+                    # Build helpful hint with valid params
+                    hint = f"[API] {search_query} valid params: {params[:300]}"
+                    # If we detected an invalid param, explicitly call it out
+                    if invalid_param and invalid_param not in params:
+                        hint += f"\n  ❌ '{invalid_param}' is NOT a valid parameter!"
+                        # Suggest similar valid param if exists
+                        for valid_p in params.split(","):
+                            valid_p = valid_p.strip()
+                            if valid_p and (invalid_param in valid_p or valid_p in invalid_param):
+                                hint += f"\n  ✓ Did you mean '{valid_p}'?"
+                    hints.append(hint)
+                    logger.info("[RAG-RETRY] Found API signature for %s", search_query)
                     break
 
         # Search error patterns for known fixes
         similar = await self.rag.search_error_patterns(error_msg[:500], n_results=2)
         logger.info("[RAG-RETRY] Found %d similar error patterns", len(similar))
         for pattern in similar:
-            fix = pattern.get("metadata", {}).get("fix")
-            if fix:
-                hints.append(f"[FIX] Similar error fixed by: {fix[:300]}")
-                logger.info("[RAG-RETRY] Found fix hint!")
-                break
+            content = pattern.get("content", "")
+            # Extract fix from document content (stored after "FIX:" marker)
+            if "FIX:" in content and pattern.get("metadata", {}).get("has_fix"):
+                import re
+                fix_match = re.search(r"FIX:\s*```python\s*(.*?)```", content, re.DOTALL)
+                if fix_match:
+                    fix = fix_match.group(1).strip()
+                    hints.append(f"[FIX] Similar error fixed by:\n{fix[:500]}")
+                    logger.info("[RAG-RETRY] Found fix hint!")
+                    break
 
         # If no hints found, add a generic hint about CONFIG pattern
         if not hints and "has no attribute" in error_msg:
@@ -767,7 +798,18 @@ The timing and visuals must sync with this script."""
         return await self._validate_with_retries(code)
 
     async def _validate_with_retries(self, code: str, original_code: str | None = None) -> str:
+        from manim_mcp.core.code_bridge import sanitize_latex_strings
+
         for attempt in range(1, self.config.gemini_max_retries + 1):
+            # Sanitize LaTeX strings BEFORE AST validation to fix common LLM errors
+            # like unterminated strings, unbalanced braces, etc.
+            try:
+                code, latex_fixes = sanitize_latex_strings(code)
+                if latex_fixes:
+                    logger.info("[VALIDATION] Pre-sanitized %d LaTeX issues", len(latex_fixes))
+            except Exception as e:
+                logger.debug("[VALIDATION] LaTeX sanitization failed: %s", e)
+
             result = self.sandbox.validate(code)
             if result.valid:
                 scenes = self.scene_parser.parse_scenes(code)
@@ -785,7 +827,9 @@ The timing and visuals must sync with this script."""
             logger.warning("Validation failed (attempt %d/%d): %s",
                            attempt, self.config.gemini_max_retries, result.errors)
             if attempt < self.config.gemini_max_retries:
-                fixed_code = await self.llm.fix_code(code, result.errors)
+                # Enhance errors with specific context for syntax errors
+                enhanced_errors = self._enhance_error_context(code, result.errors)
+                fixed_code = await self.llm.fix_code(code, enhanced_errors)
                 # Index error pattern for self-learning
                 await self._on_validation_fix(code, "; ".join(result.errors), fixed_code)
                 code = fixed_code
@@ -796,6 +840,93 @@ The timing and visuals must sync with this script."""
                 )
 
         return code
+
+    def _enhance_error_context(self, code: str, errors: list[str]) -> list[str]:
+        """Enhance error messages with specific context to help LLM fix them.
+
+        For syntax errors, extracts:
+        - The exact line that caused the error
+        - Hints about likely causes (apostrophes, mixed quotes, etc.)
+
+        Args:
+            code: The code that failed validation
+            errors: List of error messages from validator
+
+        Returns:
+            Enhanced error list with more context
+        """
+        import re
+        enhanced = []
+        lines = code.split('\n')
+
+        for error in errors:
+            enhanced_error = error
+
+            # Check for syntax error with line/column info
+            # Format: "Syntax error at line X, column Y: message"
+            syntax_match = re.search(r'[Ll]ine\s*(\d+)(?:,\s*column\s*(\d+))?', error)
+            if syntax_match:
+                line_num = int(syntax_match.group(1))
+                col_num = int(syntax_match.group(2)) if syntax_match.group(2) else None
+
+                # Get the problematic line
+                if 1 <= line_num <= len(lines):
+                    problem_line = lines[line_num - 1]
+                    enhanced_error += f"\n\nPROBLEMATIC LINE {line_num}:\n{problem_line}"
+
+                    # Add column pointer if available
+                    if col_num:
+                        pointer = ' ' * (col_num - 1) + '^'
+                        enhanced_error += f"\n{pointer}"
+
+                    # Analyze the line for common issues and add hints
+                    hints = self._analyze_line_for_hints(problem_line, error)
+                    if hints:
+                        enhanced_error += f"\n\nLIKELY CAUSE: {hints}"
+
+            # Check for unterminated string literal
+            if 'unterminated string' in error.lower():
+                # Add specific guidance
+                enhanced_error += "\n\nFIX: Check for mismatched quotes (\" vs ') or apostrophes in text like \"Newton's Law\""
+
+            enhanced.append(enhanced_error)
+
+        return enhanced
+
+    def _analyze_line_for_hints(self, line: str, error: str) -> str:
+        """Analyze a problematic line to provide specific fix hints.
+
+        Args:
+            line: The line that caused the error
+            error: The error message
+
+        Returns:
+            Hint string about likely cause, or empty string
+        """
+        hints = []
+
+        # Check for apostrophe in single-quoted string
+        # Pattern: 'something's or 's anywhere in single-quoted context
+        if "'" in line:
+            # Check if there's a word with apostrophe-s pattern
+            import re
+            if re.search(r"'[^']*\w's[^']*'", line) or re.search(r"'\w+'s", line):
+                hints.append("Contains apostrophe (like \"Newton's\") in single-quoted string - USE DOUBLE QUOTES instead")
+
+            # Check for mixed quotes (started with one, ended with other)
+            if '"' in line:
+                # Count quote types to detect mismatch
+                double_count = line.count('"')
+                single_count = line.count("'")
+                if double_count % 2 == 1 and single_count % 2 == 1:
+                    hints.append("Mixed quote types detected - string may start with \" but end with ' (or vice versa)")
+
+        # Check for common LaTeX issues
+        if 'unterminated' in error.lower() and ('Tex' in line or 'r"' in line or "r'" in line):
+            if line.count('{') != line.count('}'):
+                hints.append("Unbalanced LaTeX braces { }")
+
+        return "; ".join(hints) if hints else ""
 
     async def _generate_thumbnail(self, video_path: str, render_id: str) -> tuple[str | None, str | None]:
         """Generate thumbnail and return (presigned_url, s3_key)."""
