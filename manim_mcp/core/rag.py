@@ -6,6 +6,8 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING
 
+from manim_mcp.core.embeddings import get_embedding_function_for_collection
+
 if TYPE_CHECKING:
     from manim_mcp.config import ManimMCPConfig
 
@@ -76,10 +78,20 @@ class ChromaDBService:
                 logger.info("ChromaDB HTTP connected: %s:%d",
                            self.config.chromadb_host, self.config.chromadb_port)
 
-            # Get or create collections
+            # Get or create collections with appropriate embedding functions
+            # Code collections (scenes, api) use UniXcoder when enabled
+            # Text collections (docs, errors, patterns) use default embeddings
+            scenes_embedding_fn = get_embedding_function_for_collection(
+                self.config.rag_collection_scenes
+            )
+            api_embedding_fn = get_embedding_function_for_collection(
+                self.config.rag_collection_api
+            )
+
             self._scenes_collection = self._client.get_or_create_collection(
                 name=self.config.rag_collection_scenes,
                 metadata={"description": "Production Manim scene code"},
+                embedding_function=scenes_embedding_fn,
             )
             self._docs_collection = self._client.get_or_create_collection(
                 name=self.config.rag_collection_docs,
@@ -92,6 +104,7 @@ class ChromaDBService:
             self._api_collection = self._client.get_or_create_collection(
                 name=self.config.rag_collection_api,
                 metadata={"description": "Manimgl API signatures and parameters"},
+                embedding_function=api_embedding_fn,
             )
             self._patterns_collection = self._client.get_or_create_collection(
                 name=self.config.rag_collection_patterns,
@@ -262,31 +275,176 @@ class ChromaDBService:
         self,
         query: str,
         n_results: int = 5,
+        exact_match_boost: float = 2.0,
     ) -> list[dict]:
-        """Search for API signatures matching a query.
+        """Search for API signatures using hybrid search (keyword + semantic).
+
+        Combines exact keyword matching on method names with semantic similarity
+        for better retrieval of API methods like 'FadeIn', 'Transform', etc.
 
         Args:
             query: Method name, class name, or description
             n_results: Number of results to return
+            exact_match_boost: Multiplier for exact match scores (default 2.0)
 
         Returns:
-            List of matching API signatures with metadata
+            List of matching API signatures with metadata, ranked by hybrid score
         """
         if not self.available or not self._api_collection:
             return []
 
         try:
-            results = self._api_collection.query(
-                query_texts=[query],
+            return await self._search_api_hybrid(
+                query=query,
                 n_results=n_results,
-                include=["documents", "metadatas", "distances"],
+                exact_match_boost=exact_match_boost,
             )
-
-            return self._format_results(results)
-
         except Exception as e:
             logger.warning("API signature search failed: %s", e)
             return []
+
+    async def _search_api_hybrid(
+        self,
+        query: str,
+        n_results: int = 5,
+        exact_match_boost: float = 2.0,
+    ) -> list[dict]:
+        """Perform hybrid search combining exact keyword matching with semantic search.
+
+        Strategy:
+        1. Extract potential method/class names from query
+        2. Search for exact matches on method_name and class_name metadata
+        3. Perform semantic search for broader matches
+        4. Merge results with boosted scores for exact matches
+        5. Deduplicate and return top n_results
+
+        Args:
+            query: Search query (method name, class name, or description)
+            n_results: Number of results to return
+            exact_match_boost: Score multiplier for exact matches
+
+        Returns:
+            List of API signatures ranked by hybrid score
+        """
+        import re
+
+        results_map: dict[str, dict] = {}  # doc_id -> result with score
+
+        # Extract potential identifiers from query (CamelCase, snake_case, dotted)
+        # Examples: "FadeIn", "move_to", "Axes.get_graph", "Transform animation"
+        identifiers = re.findall(r'[A-Z][a-zA-Z0-9]*|[a-z_][a-z0-9_]*', query)
+        # Also try the full query for dotted names like "Axes.get_graph"
+        if '.' in query:
+            identifiers.append(query.split()[0] if ' ' in query else query)
+
+        # Phase 1: Exact matches on metadata fields
+        for identifier in identifiers:
+            if len(identifier) < 2:
+                continue
+
+            # Try exact match on method_name
+            try:
+                exact_results = self._api_collection.get(
+                    where={"method_name": identifier},
+                    include=["documents", "metadatas"],
+                )
+                if exact_results and exact_results.get("ids"):
+                    for i, doc_id in enumerate(exact_results["ids"]):
+                        if doc_id not in results_map:
+                            results_map[doc_id] = {
+                                "document_id": doc_id,
+                                "content": exact_results["documents"][i] if exact_results.get("documents") else "",
+                                "metadata": exact_results["metadatas"][i] if exact_results.get("metadatas") else {},
+                                "similarity_score": 1.0 * exact_match_boost,  # Boosted exact match
+                                "match_type": "exact_method",
+                            }
+                            logger.debug("[RAG] Exact method match: %s (boosted score=%.2f)",
+                                       doc_id, 1.0 * exact_match_boost)
+            except Exception as e:
+                logger.debug("Exact method_name search failed for '%s': %s", identifier, e)
+
+            # Try exact match on class_name
+            try:
+                class_results = self._api_collection.get(
+                    where={"class_name": identifier},
+                    include=["documents", "metadatas"],
+                )
+                if class_results and class_results.get("ids"):
+                    for i, doc_id in enumerate(class_results["ids"]):
+                        if doc_id not in results_map:
+                            results_map[doc_id] = {
+                                "document_id": doc_id,
+                                "content": class_results["documents"][i] if class_results.get("documents") else "",
+                                "metadata": class_results["metadatas"][i] if class_results.get("metadatas") else {},
+                                "similarity_score": 0.9 * exact_match_boost,  # Slightly lower than method match
+                                "match_type": "exact_class",
+                            }
+                            logger.debug("[RAG] Exact class match: %s (boosted score=%.2f)",
+                                       doc_id, 0.9 * exact_match_boost)
+            except Exception as e:
+                logger.debug("Exact class_name search failed for '%s': %s", identifier, e)
+
+        # Phase 2: Semantic search for broader matches
+        semantic_results = self._api_collection.query(
+            query_texts=[query],
+            n_results=n_results * 2,  # Fetch more to allow for deduplication
+            include=["documents", "metadatas", "distances"],
+        )
+
+        if semantic_results and semantic_results.get("ids"):
+            ids = semantic_results["ids"][0] if semantic_results["ids"] else []
+            documents = semantic_results["documents"][0] if semantic_results.get("documents") else []
+            metadatas = semantic_results["metadatas"][0] if semantic_results.get("metadatas") else []
+            distances = semantic_results["distances"][0] if semantic_results.get("distances") else []
+
+            for i, doc_id in enumerate(ids):
+                semantic_score = 1.0 - (distances[i] if i < len(distances) else 0.0)
+
+                if doc_id in results_map:
+                    # Already have exact match - keep the higher boosted score
+                    # but note that semantic also matched (good signal)
+                    existing = results_map[doc_id]
+                    existing["match_type"] = f"{existing.get('match_type', 'unknown')}+semantic"
+                    logger.debug("[RAG] Semantic also matched exact: %s (keeping boosted score=%.2f)",
+                               doc_id, existing["similarity_score"])
+                else:
+                    # New result from semantic search only
+                    results_map[doc_id] = {
+                        "document_id": doc_id,
+                        "content": documents[i] if i < len(documents) else "",
+                        "metadata": metadatas[i] if i < len(metadatas) else {},
+                        "similarity_score": semantic_score,
+                        "match_type": "semantic",
+                    }
+
+        # Phase 3: Sort by score and return top n_results
+        sorted_results = sorted(
+            results_map.values(),
+            key=lambda x: x["similarity_score"],
+            reverse=True
+        )
+
+        # Clean up internal match_type field before returning (optional: keep for debugging)
+        final_results = []
+        for r in sorted_results[:n_results]:
+            result = {
+                "document_id": r["document_id"],
+                "content": r["content"],
+                "metadata": r["metadata"],
+                "similarity_score": min(r["similarity_score"], 1.0),  # Cap at 1.0 for display
+            }
+            # Preserve match_type in metadata for debugging/analytics
+            if "match_type" in r:
+                result["metadata"] = {**result["metadata"], "_match_type": r["match_type"]}
+            final_results.append(result)
+
+        logger.debug("[RAG] Hybrid API search for '%s': %d exact + %d semantic -> %d results",
+                    query,
+                    sum(1 for r in results_map.values() if "exact" in r.get("match_type", "")),
+                    sum(1 for r in results_map.values() if r.get("match_type") == "semantic"),
+                    len(final_results))
+
+        return final_results
 
     async def get_api_signature(
         self,
@@ -416,7 +574,11 @@ class ChromaDBService:
             formatted = self._format_results(results)
 
             if prioritize_3b1b and formatted:
-                formatted = self._prioritize_3b1b_results(formatted, n_results or self.config.rag_results_limit)
+                formatted = self._prioritize_3b1b_results(
+                    formatted,
+                    n_results or self.config.rag_results_limit,
+                    query=query  # Pass query for method-based re-ranking
+                )
 
             return formatted
 
@@ -424,15 +586,21 @@ class ChromaDBService:
             logger.warning("Scene search failed: %s", e)
             return []
 
-    def _prioritize_3b1b_results(self, results: list[dict], n_results: int) -> list[dict]:
-        """Re-rank results to prioritize 3b1b original code over generated code.
+    def _prioritize_3b1b_results(self, results: list[dict], n_results: int, query: str = "") -> list[dict]:
+        """Re-rank results to prioritize 3b1b original code and method-containing results.
+
+        Two-stage re-ranking:
+        1. Filter out generated code, boost 3b1b original
+        2. Boost results containing actual method calls related to query
 
         3b1b code is identified by:
         - Has 'manim_imports_ext' in code (3b1b custom library)
         - Has source metadata indicating 3b1b
         - Does NOT have 'source': 'generated' in metadata
         """
-        # Separate into 3b1b original vs generated
+        import re
+
+        # Stage 1: Filter generated, identify 3b1b
         original_3b1b = []
         other_results = []
 
@@ -461,9 +629,99 @@ class ChromaDBService:
             else:
                 other_results.append(r)
 
+        # Stage 2: Boost results containing relevant method calls
+        # Extract method patterns from query (scalable - no hardcoded domains)
+        method_patterns = self._extract_method_patterns(query)
+
+        if method_patterns:
+            # Score each result by method presence
+            def method_score(r):
+                content = r.get("content", "")
+                score = 0
+                for pattern in method_patterns:
+                    if pattern in content:
+                        score += 1
+                        # Extra boost if it's a method CALL (has parentheses after)
+                        if re.search(rf"{re.escape(pattern)}\s*\(", content):
+                            score += 2
+                return score
+
+            # Sort 3b1b results by method score (higher first)
+            original_3b1b.sort(key=method_score, reverse=True)
+            other_results.sort(key=method_score, reverse=True)
+
+            # Log what we boosted
+            if original_3b1b and method_patterns:
+                top_score = method_score(original_3b1b[0])
+                if top_score > 0:
+                    logger.info("[RAG] Boosted result with %d method matches for patterns: %s",
+                               top_score, method_patterns[:3])
+
         # Prioritize: 3b1b first, then others
         prioritized = original_3b1b + other_results
         return prioritized[:n_results]
+
+    def _extract_method_patterns(self, query: str) -> list[str]:
+        """Extract likely manimgl method names from query.
+
+        Scalable approach - maps common words to method patterns:
+        - "riemann" -> get_riemann_rectangles
+        - "graph" -> get_graph
+        - "area" -> get_area_under_graph
+        - etc.
+
+        Returns method name patterns to search for in results.
+        """
+        if not query:
+            return []
+
+        query_lower = query.lower()
+        patterns = []
+
+        # Map concept words to manimgl method names
+        # This is more scalable than hardcoding in query building
+        concept_to_methods = {
+            "riemann": ["get_riemann_rectangles"],
+            "rectangle": ["get_riemann_rectangles", "Rectangle"],
+            "graph": ["get_graph", "get_area_under_graph"],
+            "area": ["get_area_under_graph", "get_riemann_rectangles"],
+            "integral": ["get_area_under_graph", "get_riemann_rectangles"],
+            "derivative": ["get_derivative_graph", "get_secant_slope_group"],
+            "tangent": ["get_tangent_line", "TangentLine"],
+            "secant": ["get_secant_slope_group"],
+            "axes": ["Axes", "NumberPlane", "get_graph"],
+            "transform": ["Transform", "ReplacementTransform", "TransformMatchingShapes"],
+            "fade": ["FadeIn", "FadeOut", "FadeTransform"],
+            "write": ["Write", "ShowCreation"],
+            "animate": [".animate."],
+            "vector": ["Vector", "Arrow"],
+            "matrix": ["Matrix", "IntegerMatrix"],
+            "circle": ["Circle", "Arc", "Annulus"],
+            "line": ["Line", "DashedLine", "NumberLine"],
+            "text": ["Text", "Tex", "TexText"],
+            "label": ["get_graph_label", "DecimalNumber"],
+            "dot": ["Dot", "SmallDot"],
+            "arrow": ["Arrow", "Vector", "DoubleArrow"],
+            "brace": ["Brace", "BraceLabel"],
+            "updater": ["add_updater", "always_redraw"],
+            "3d": ["ThreeDAxes", "Surface", "ParametricSurface"],
+            "surface": ["Surface", "ParametricSurface"],
+            "camera": ["frame", "set_camera_orientation"],
+        }
+
+        for concept, methods in concept_to_methods.items():
+            if concept in query_lower:
+                patterns.extend(methods)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_patterns = []
+        for p in patterns:
+            if p not in seen:
+                seen.add(p)
+                unique_patterns.append(p)
+
+        return unique_patterns
 
     async def search_documentation(
         self,
@@ -679,11 +937,14 @@ class ChromaDBService:
 
         try:
             self._client.delete_collection(collection_name)
-            # Recreate empty collection
+            # Recreate empty collection with appropriate embedding function
+            embedding_fn = get_embedding_function_for_collection(collection_name)
+
             if collection_name == self.config.rag_collection_scenes:
                 self._scenes_collection = self._client.get_or_create_collection(
                     name=collection_name,
                     metadata={"description": "Production Manim scene code"},
+                    embedding_function=embedding_fn,
                 )
             elif collection_name == self.config.rag_collection_docs:
                 self._docs_collection = self._client.get_or_create_collection(
@@ -699,6 +960,7 @@ class ChromaDBService:
                 self._api_collection = self._client.get_or_create_collection(
                     name=collection_name,
                     metadata={"description": "Manimgl API signatures and parameters"},
+                    embedding_function=embedding_fn,
                 )
             elif collection_name == self.config.rag_collection_patterns:
                 self._patterns_collection = self._client.get_or_create_collection(

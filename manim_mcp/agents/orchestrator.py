@@ -201,11 +201,14 @@ class AgentOrchestrator:
         prompt: str,
         narration_script: list[str] | None = None,
     ) -> str:
-        """Simple generation with RAG context but without the full agent pipeline.
+        """Simple generation with FULL RAG context (all sources in parallel).
 
-        Uses RAG to find similar scenes for few-shot context, then generates
-        code with the LLM. This is faster than the full pipeline but still
-        benefits from RAG examples.
+        Queries all RAG collections in parallel for comprehensive context:
+        - Similar scenes (3b1b examples)
+        - API signatures (method constraints)
+        - Animation patterns (reusable templates)
+        - Documentation (library usage)
+        - Error patterns (common mistakes to avoid)
 
         Args:
             prompt: User's animation request
@@ -217,29 +220,79 @@ class AgentOrchestrator:
         if narration_script:
             logger.info("Simple generation will follow %d-sentence narration script", len(narration_script))
 
-        # Query RAG for similar scenes if available
-        rag_context = ""
-        if self.rag and self.rag.available:
-            try:
-                logger.info("[RAG] Searching similar scenes for simple generation")
-                similar_scenes = await self.rag.search_similar_scenes(
-                    query=prompt,
-                    n_results=3,
-                    prioritize_3b1b=True,
-                )
-                if similar_scenes:
-                    logger.info(
-                        "[RAG] Found %d similar scenes for context",
-                        len(similar_scenes),
-                    )
-                    rag_context = self._build_rag_context(similar_scenes)
-            except Exception as e:
-                logger.warning("[RAG] Failed to query similar scenes: %s", e)
+        # Query RAG sources with PRIORITY ordering (most important first)
+        # Strategy: API signatures + scenes in parallel (critical), then patterns if needed
+        scenes_context = ""
+        api_context = ""
+        patterns_context = ""
+        docs_context = ""
+        errors_context = ""
 
-        # Build enhanced prompt
+        if self.rag and self.rag.available:
+            logger.info("[RAG] Querying priority sources for simple generation")
+            try:
+                # TIER 1: Critical queries in parallel (API signatures + similar scenes)
+                # These are essential for correctness and style
+                tier1_results = await asyncio.gather(
+                    self.rag.search_api_signatures(query=prompt, n_results=5),
+                    self.rag.search_similar_scenes(query=prompt, n_results=3, prioritize_3b1b=True),
+                    return_exceptions=True,
+                )
+
+                api_sigs, similar_scenes = tier1_results
+
+                if isinstance(api_sigs, list) and api_sigs:
+                    logger.info("[RAG] Found %d API signatures", len(api_sigs))
+                    api_context = self._build_api_context(api_sigs)
+
+                if isinstance(similar_scenes, list) and similar_scenes:
+                    logger.info("[RAG] Found %d similar scenes", len(similar_scenes))
+                    scenes_context = self._build_rag_context(similar_scenes)
+
+                # TIER 2: Animation patterns (only if scenes didn't provide enough context)
+                # Skip if we already have good scene examples
+                if not scenes_context or len(scenes_context) < 500:
+                    try:
+                        patterns = await self.rag.search_animation_patterns(query=prompt, n_results=3)
+                        if patterns:
+                            logger.info("[RAG] Found %d animation patterns", len(patterns))
+                            patterns_context = self._build_patterns_context(patterns)
+                    except Exception as e:
+                        logger.debug("[RAG] Patterns query failed: %s", e)
+
+                # TIER 3: Error patterns (lightweight, useful for avoiding common mistakes)
+                # Only query if we have API context (errors are about API misuse)
+                if api_context:
+                    try:
+                        errors = await self.rag.search_error_patterns(query=prompt, n_results=2)
+                        if errors:
+                            logger.info("[RAG] Found %d error patterns to avoid", len(errors))
+                            errors_context = self._build_errors_context(errors)
+                    except Exception as e:
+                        logger.debug("[RAG] Errors query failed: %s", e)
+
+                # Skip docs for simple generation - scenes provide better examples
+
+            except Exception as e:
+                logger.warning("[RAG] Failed to query RAG sources: %s", e)
+
+        # Build enhanced prompt with all RAG context
         enhanced_prompt = prompt
-        if rag_context:
-            enhanced_prompt = f"{prompt}\n\nHere are some similar animations for reference:\n{rag_context}"
+
+        if api_context:
+            enhanced_prompt = f"{enhanced_prompt}\n\n## API CONSTRAINTS - USE THESE EXACT SIGNATURES:\n{api_context}"
+
+        if scenes_context:
+            enhanced_prompt = f"{enhanced_prompt}\n\n## REFERENCE EXAMPLES (from 3Blue1Brown):\n{scenes_context}"
+
+        if patterns_context:
+            enhanced_prompt = f"{enhanced_prompt}\n\n## ANIMATION PATTERNS TO USE:\n{patterns_context}"
+
+        if docs_context:
+            enhanced_prompt = f"{enhanced_prompt}\n\n## DOCUMENTATION REFERENCE:\n{docs_context}"
+
+        if errors_context:
+            enhanced_prompt = f"{enhanced_prompt}\n\n## COMMON MISTAKES TO AVOID:\n{errors_context}"
 
         # Add narration script guidance if provided (code-audio sync)
         if narration_script:
@@ -257,20 +310,80 @@ The timing and visuals must sync with this script."""
         return await self.llm.generate_code(enhanced_prompt)
 
     def _build_rag_context(self, similar_scenes: list[dict]) -> str:
-        """Format RAG results as context for generation."""
+        """Format RAG results as context for generation.
+
+        Shows full code for high-similarity matches to enable close following of patterns.
+        """
         lines = []
         for i, scene in enumerate(similar_scenes[:3], 1):
             meta = scene.get("metadata", {})
+            similarity = scene.get("similarity_score", 0)
             prompt_hint = meta.get("prompt", "")[:100]
             if prompt_hint:
-                lines.append(f"\nExample {i} (prompt: {prompt_hint}):")
+                lines.append(f"\nExample {i} (prompt: {prompt_hint}, similarity: {similarity:.2f}):")
             else:
-                lines.append(f"\nExample {i}:")
-            # Show code snippet (first 800 chars)
-            code = scene.get("content", "")[:800]
+                lines.append(f"\nExample {i} (similarity: {similarity:.2f}):")
+
+            # Show more code for high-similarity matches (up to 3000 chars)
+            # This allows LLM to follow working patterns closely instead of inventing
+            max_chars = 3000 if similarity > 0.7 else 1500
+            code = scene.get("content", "")[:max_chars]
             if code:
                 lines.append(f"```python\n{code}\n```")
+                if similarity > 0.8:
+                    lines.append("**IMPORTANT: This is a highly relevant example. Follow this pattern closely.**")
         return "\n".join(lines)
+
+    def _build_api_context(self, api_sigs: list[dict]) -> str:
+        """Format API signatures as constraints for generation."""
+        lines = []
+        for sig in api_sigs[:5]:
+            meta = sig.get("metadata", {})
+            method_name = meta.get("method_name", meta.get("full_name", ""))
+            valid_params = meta.get("valid_params", meta.get("parameter_names", ""))
+            if method_name:
+                if valid_params:
+                    lines.append(f"- {method_name}({valid_params})")
+                else:
+                    content = sig.get("content", "")[:200]
+                    if content:
+                        lines.append(f"- {content}")
+        return "\n".join(lines) if lines else ""
+
+    def _build_patterns_context(self, patterns: list[dict]) -> str:
+        """Format animation patterns as templates."""
+        lines = []
+        for i, pattern in enumerate(patterns[:3], 1):
+            meta = pattern.get("metadata", {})
+            name = meta.get("name", meta.get("pattern_type", f"Pattern {i}"))
+            lines.append(f"\n### {name}")
+            code = pattern.get("content", "")[:600]
+            if code:
+                lines.append(f"```python\n{code}\n```")
+        return "\n".join(lines) if lines else ""
+
+    def _build_docs_context(self, docs: list[dict]) -> str:
+        """Format documentation entries."""
+        lines = []
+        for doc in docs[:2]:
+            content = doc.get("content", "")[:400]
+            if content:
+                lines.append(content)
+        return "\n\n".join(lines) if lines else ""
+
+    def _build_errors_context(self, errors: list[dict]) -> str:
+        """Format error patterns as warnings."""
+        lines = []
+        for error in errors[:3]:
+            meta = error.get("metadata", {})
+            error_msg = meta.get("error_message", "")[:100]
+            fix = meta.get("fix", "")[:150]
+            if error_msg:
+                if fix:
+                    lines.append(f"- AVOID: {error_msg}\n  FIX: {fix}")
+                else:
+                    lines.append(f"- AVOID: {error_msg}")
+        return "\n".join(lines) if lines else ""
 
     async def _store_agent_error(
         self,

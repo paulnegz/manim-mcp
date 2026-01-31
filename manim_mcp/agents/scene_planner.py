@@ -156,13 +156,15 @@ class ScenePlannerAgent(BaseAgent):
         lines = []
         for i, scene in enumerate(similar_scenes[:3], 1):
             meta = scene.get("metadata", {})
+            similarity = scene.get("similarity_score", 0)
             prompt_hint = meta.get("prompt", "")[:100]
             if prompt_hint:
-                lines.append(f"{i}. Prompt: {prompt_hint}")
-            # Show code snippet (first 500 chars)
-            code = scene.get("content", "")[:500]
+                lines.append(f"{i}. Prompt: {prompt_hint} (similarity: {similarity:.2f})")
+            # Show more code for high-similarity matches
+            max_chars = 1000 if similarity > 0.7 else 500
+            code = scene.get("content", "")[:max_chars]
             if code:
-                lines.append(f"   Code preview: {code[:200]}...")
+                lines.append(f"   Code preview: {code[:400]}...")
         return "\n".join(lines)
 
     def _default_segments(self) -> list[SceneSegment]:

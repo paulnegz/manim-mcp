@@ -104,6 +104,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # index patterns
     index_sub.add_parser("patterns", help="Index 3b1b animation patterns for code generation")
 
+    # index api-graph (Phase 2)
+    index_sub.add_parser(
+        "api-graph",
+        help="Extract method call sequences from indexed scenes for API usage graph",
+    )
+
     return parser
 
 

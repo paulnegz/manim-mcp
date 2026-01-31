@@ -25,21 +25,27 @@ from manim_mcp.models import RenderSceneInput
 
 if TYPE_CHECKING:
     from manim_mcp.config import ManimMCPConfig
+    from manim_mcp.core.rag import ChromaDBService
     from manim_mcp.core.scene_parser import SceneParser
 
 logger = logging.getLogger(__name__)
 
 
-def prepare_code_for_manimgl(code: str) -> str:
+def prepare_code_for_manimgl(code: str, rag: "ChromaDBService | None" = None) -> str:
     """Prepare code to run with manimgl (3b1b's library).
 
     Uses the code bridge to transform any Manim CE patterns to manimgl,
     then normalizes imports.
+
+    Args:
+        code: Python code that may contain Manim CE patterns
+        rag: Optional ChromaDBService for dynamic API validation
     """
     from manim_mcp.core.code_bridge import bridge_code
 
     # Use the comprehensive code bridge for CE → manimgl transformation
-    code = bridge_code(code)
+    # Pass RAG for dynamic API validation against 1,652+ indexed signatures
+    code = bridge_code(code, rag=rag)
 
     # Additional import normalization for 3b1b-specific patterns
     replacements = [
@@ -70,6 +76,7 @@ class RenderOutput:
     s3_object_key: str | None = None
     url: str | None = None
     thumbnail_url: str | None = None
+    thumbnail_s3_key: str | None = None
 
     @property
     def resolution(self) -> str | None:

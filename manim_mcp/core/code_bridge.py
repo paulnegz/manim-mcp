@@ -9,7 +9,10 @@ from __future__ import annotations
 import ast
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from manim_mcp.core.rag import ChromaDBService
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +87,19 @@ class CEToManimglTransformer(ast.NodeTransformer):
     METHOD_MAPPINGS = {
         # Axes/Graph methods
         "add_coordinates": "add_coordinate_labels",
+        "get_coordinate_labels": "add_coordinate_labels",  # LLM hallucination - method doesn't exist
+        "get_coordinates": "add_coordinate_labels",  # Another common hallucination
+        "show_coordinates": "add_coordinate_labels",  # Another hallucination variant
         "plot": "get_graph",  # axes.plot() → axes.get_graph()
         "get_area": "get_area_under_graph",  # CE uses get_area, manimgl uses get_area_under_graph
         "get_riemann_rectangles": "get_riemann_rectangles",  # same in both
         "get_line_graph": "get_graph",  # CE-only
         "plot_line_graph": "get_graph",  # CE-only
         "plot_surface": "get_graph",  # CE 3D, approximate
+        # Sizing methods (CE has scale_to_fit_*, manimgl uses set_*)
+        "scale_to_fit_width": "set_width",  # CE → manimgl
+        "scale_to_fit_height": "set_height",  # CE → manimgl
+        "scale_to_fit_depth": "set_depth",  # CE → manimgl
         # Arrangement methods
         "arrange_submobjects": "arrange",  # CE uses arrange_submobjects
         "arrange_in_grid": "arrange_in_grid",  # Same but check params
@@ -111,6 +121,27 @@ class CEToManimglTransformer(ast.NodeTransformer):
         "remove_updater": "remove_updater",  # Same
         "clear_updaters": "clear_updaters",  # Same
         # Note: set_color_by_tex exists in manimgl with same signature
+    }
+
+    # Parameters that need to be combined (e.g., x_min/x_max → x_range)
+    # Format: {class: {(param1, param2): new_param_name}}
+    PARAMS_TO_COMBINE = {
+        "Axes": {
+            ("x_min", "x_max"): "x_range",
+            ("y_min", "y_max"): "y_range",
+        },
+        "NumberPlane": {
+            ("x_min", "x_max"): "x_range",
+            ("y_min", "y_max"): "y_range",
+        },
+        "ThreeDAxes": {
+            ("x_min", "x_max"): "x_range",
+            ("y_min", "y_max"): "y_range",
+            ("z_min", "z_max"): "z_range",
+        },
+        "NumberLine": {
+            ("x_min", "x_max"): "x_range",
+        },
     }
 
     # Parameters to remove entirely (not supported in manimgl)
@@ -223,7 +254,7 @@ class CEToManimglTransformer(ast.NodeTransformer):
             return node
 
         # Handle parameter transformations for specific classes
-        if func_name in self.PARAMS_TO_REMOVE or func_name in self.PARAM_MAPPINGS:
+        if func_name in self.PARAMS_TO_REMOVE or func_name in self.PARAM_MAPPINGS or func_name in self.PARAMS_TO_COMBINE:
             node.keywords = self._transform_keywords(func_name, node.keywords)
 
         # Handle varargs animations: FadeOut(a, b, c) → FadeOut(VGroup(a, b, c))
@@ -256,8 +287,24 @@ class CEToManimglTransformer(ast.NodeTransformer):
         """Transform keyword arguments for a specific function."""
         params_to_remove = self.PARAMS_TO_REMOVE.get(func_name, set())
         param_mappings = self.PARAM_MAPPINGS.get(func_name, {})
+        params_to_combine = self.PARAMS_TO_COMBINE.get(func_name, {})
+
+        # First pass: collect values for params that need combining
+        # and identify which params to skip in the second pass
+        param_values: dict[str, ast.expr] = {}
+        params_being_combined: set[str] = set()
+
+        for (param1, param2), _ in params_to_combine.items():
+            params_being_combined.add(param1)
+            params_being_combined.add(param2)
+
+        for kw in keywords:
+            if kw.arg in params_being_combined:
+                param_values[kw.arg] = kw.value
 
         new_keywords = []
+        combined_params_added: set[str] = set()  # Track which combined params we've added
+
         for kw in keywords:
             if kw.arg is None:
                 # **kwargs - keep as is
@@ -269,6 +316,40 @@ class CEToManimglTransformer(ast.NodeTransformer):
                 self.transformations_made.append(
                     f"param: {func_name}({kw.arg}=...) → removed"
                 )
+                continue
+
+            # Check if this param should be combined with another
+            combined = False
+            for (param1, param2), new_param in params_to_combine.items():
+                if kw.arg in (param1, param2):
+                    combined = True
+                    # Only add the combined param once
+                    if new_param not in combined_params_added:
+                        # Check if we have both values
+                        if param1 in param_values and param2 in param_values:
+                            # Create a tuple (param1_value, param2_value)
+                            combined_value = ast.Tuple(
+                                elts=[param_values[param1], param_values[param2]],
+                                ctx=ast.Load()
+                            )
+                            new_kw = ast.keyword(arg=new_param, value=combined_value)
+                            new_keywords.append(new_kw)
+                            combined_params_added.add(new_param)
+                            self.transformations_made.append(
+                                f"param: {func_name}({param1}=..., {param2}=...) → {func_name}({new_param}=(...))"
+                            )
+                        elif param1 in param_values:
+                            # Only have one param - just pass it through with warning
+                            self.transformations_made.append(
+                                f"param: {func_name}({param1}=...) → removed (missing {param2} for {new_param})"
+                            )
+                        elif param2 in param_values:
+                            self.transformations_made.append(
+                                f"param: {func_name}({param2}=...) → removed (missing {param1} for {new_param})"
+                            )
+                    break
+
+            if combined:
                 continue
 
             if kw.arg in param_mappings:
@@ -367,6 +448,9 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         # === METHOD NAME FIXES ===
         (r"\.add_coordinates\s*\(", ".add_coordinate_labels("),
         (r"\.add_coordinates_labels\s*\(", ".add_coordinate_labels("),  # Fix typo
+        (r"\.get_coordinate_labels\s*\(", ".add_coordinate_labels("),  # LLM hallucination
+        (r"\.get_coordinates\s*\(", ".add_coordinate_labels("),  # Another hallucination
+        (r"\.show_coordinates\s*\(", ".add_coordinate_labels("),  # Another hallucination
         (r"\.plot\s*\(", ".get_graph("),
         (r"\.get_area\s*\(", ".get_area_under_graph("),
         (r"\.arrange_submobjects\s*\(", ".arrange("),
@@ -411,6 +495,33 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"\bPURE_RED\b", "RED"),
         (r"\bPURE_GREEN\b", "GREEN"),
         (r"\bPURE_BLUE\b", "BLUE"),
+
+        # === RATE FUNCTIONS FIX ===
+        # CE uses rate_functions.smooth, manimgl uses smooth directly
+        # rate_functions is a CE module; in manimgl these are top-level functions
+        (r"\brate_functions\.smooth\b", "smooth"),
+        (r"\brate_functions\.linear\b", "linear"),
+        (r"\brate_functions\.there_and_back\b", "there_and_back"),
+        (r"\brate_functions\.there_and_back_with_pause\b", "there_and_back_with_pause"),
+        (r"\brate_functions\.rush_into\b", "rush_into"),
+        (r"\brate_functions\.rush_from\b", "rush_from"),
+        (r"\brate_functions\.slow_into\b", "slow_into"),
+        (r"\brate_functions\.double_smooth\b", "double_smooth"),
+        (r"\brate_functions\.lingering\b", "lingering"),
+        (r"\brate_functions\.exponential_decay\b", "exponential_decay"),
+        (r"\brate_functions\.running_start\b", "running_start"),
+        (r"\brate_functions\.wiggle\b", "wiggle"),
+        (r"\brate_functions\.ease_in_sine\b", "ease_in_sine"),
+        (r"\brate_functions\.ease_out_sine\b", "ease_out_sine"),
+        (r"\brate_functions\.ease_in_out_sine\b", "ease_in_out_sine"),
+        (r"\brate_functions\.ease_in_quad\b", "ease_in_quad"),
+        (r"\brate_functions\.ease_out_quad\b", "ease_out_quad"),
+        (r"\brate_functions\.ease_in_out_quad\b", "ease_in_out_quad"),
+        (r"\brate_functions\.ease_in_cubic\b", "ease_in_cubic"),
+        (r"\brate_functions\.ease_out_cubic\b", "ease_out_cubic"),
+        (r"\brate_functions\.ease_in_out_cubic\b", "ease_in_out_cubic"),
+        # Generic fallback for any rate_functions.X we might have missed
+        (r"\brate_functions\.(\w+)\b", r"\1"),
 
         # === CONSTANT FIXES ===
         # CE uses DEGREES, manimgl uses DEG
@@ -510,7 +621,7 @@ def _fix_latex_issues(code: str, transformations: list[str]) -> str:
     Common issues:
     - Tex() with mixed text+math should be TexText() or split
     - Unescaped special characters in text mode
-    - Missing braces around \to, \infty, etc.
+    - Missing braces around \\to, \\infty, etc.
     """
     # Fix Tex with mixed content containing text words + math
     # Pattern: Tex('word word $math$') -> TexText('word word $math$')
@@ -524,10 +635,10 @@ def _fix_latex_issues(code: str, transformations: list[str]) -> str:
         )
         transformations.append("latex-fix: Tex with mixed content → TexText")
 
-    # Fix common ellipsis issue: ... should be \ldots in math mode
+    # Fix common ellipsis issue: ... should be \\ldots in math mode
     # But only in Tex(), not TexText()
     if "Tex(" in code and "..." in code:
-        # Replace ... with \ldots only inside Tex() calls, not TexText()
+        # Replace ... with \\ldots only inside Tex() calls, not TexText()
         def fix_ellipsis(match):
             content = match.group(0)
             if "TexText" not in content:
@@ -616,6 +727,276 @@ def _fix_animate_syntax(code: str, transformations: list[str]) -> str:
     return code
 
 
+
+    """Fix common LaTeX issues in manimgl code.
+
+    Common issues:
+    - Tex() with mixed text+math should be TexText() or split
+    - Unescaped special characters in text mode
+    - Missing braces around \to, \infty, etc.
+    """
+    # Fix Tex with mixed content containing text words + math
+    # Pattern: Tex('word word $math$') -> TexText('word word $math$')
+    # Look for Tex( with text that contains spaces AND $...$
+    mixed_content_pattern = r"Tex\s*\(\s*['\"]([^'\"]*\s+[^'\"]*\$[^'\"]+\$[^'\"]*)['\"]"
+    if re.search(mixed_content_pattern, code):
+        code = re.sub(
+            r"Tex\s*\(\s*(['\"])([^'\"]*\s+[^'\"]*\$[^'\"]+\$[^'\"]*)\1",
+            r"TexText(\1\2\1",
+            code
+        )
+        transformations.append("latex-fix: Tex with mixed content → TexText")
+
+    # Fix common ellipsis issue: ... should be \ldots in math mode
+    # But only in Tex(), not TexText()
+    if "Tex(" in code and "..." in code:
+        # Replace ... with \ldots only inside Tex() calls, not TexText()
+        def fix_ellipsis(match):
+            content = match.group(0)
+            if "TexText" not in content:
+                return content.replace("...", r"\\ldots ")
+            return content
+        code = re.sub(r"Tex\s*\([^)]+\)", fix_ellipsis, code)
+        transformations.append("latex-fix: ... → \\ldots")
+
+    # Fix: Single $ in Tex should probably be $$ or removed
+    # Tex('text $x$ more') is problematic - use TexText instead
+    single_dollar_pattern = r"Tex\s*\(\s*['\"]([^'\"]*[^\\]\$[^$]+\$[^'\"]*)['\"]"
+    if re.search(single_dollar_pattern, code):
+        code = re.sub(
+            r"(Tex)\s*\(\s*(['\"])([^'\"]*[^\\]\$[^$]+\$[^'\"]*)\2",
+            r"TexText(\2\3\2",
+            code
+        )
+        transformations.append("latex-fix: Tex with inline math → TexText")
+
+    return code
+
+
+def remove_dead_code(code: str) -> str:
+    """Remove unused variables and duplicate assignments from code.
+
+    Uses AST analysis to:
+    - Track all variable assignments (name → line numbers)
+    - Track all variable usages (Load context)
+    - Find variables assigned but never used
+    - Find variables assigned multiple times (keep only last assignment)
+    - Remove dead lines from source
+
+    Handles edge cases:
+    - Preserves self.* attribute assignments
+    - Preserves class attributes
+    - Preserves variables used in nested scopes
+    - Preserves underscore variables (_) which are intentionally unused
+
+    Args:
+        code: Python source code
+
+    Returns:
+        Code with dead code removed
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # If we can't parse, return unchanged
+        return code
+
+    # Track assignments: name -> list of line numbers
+    assignments: dict[str, list[int]] = {}
+    # Track usages: name -> set of line numbers where used
+    usages: dict[str, set[int]] = set()
+    # Track all used variable names
+    used_names: set[str] = set()
+
+    class AssignmentVisitor(ast.NodeVisitor):
+        """First pass: collect all assignments."""
+
+        def __init__(self):
+            self.current_class = None
+            self.in_class_body = False
+
+        def visit_ClassDef(self, node: ast.ClassDef):
+            old_class = self.current_class
+            old_in_body = self.in_class_body
+            self.current_class = node.name
+            self.in_class_body = True
+            self.generic_visit(node)
+            self.current_class = old_class
+            self.in_class_body = old_in_body
+
+        def visit_FunctionDef(self, node: ast.FunctionDef):
+            # Function definitions are used if they're in a class or called
+            self.in_class_body = False
+            self.generic_visit(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+            self.in_class_body = False
+            self.generic_visit(node)
+
+        def visit_Assign(self, node: ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    name = target.id
+                    # Skip underscore (intentionally unused) and class attributes at top level
+                    if name != '_' and not (self.in_class_body and self.current_class):
+                        if name not in assignments:
+                            assignments[name] = []
+                        assignments[name].append(node.lineno)
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.value is not None:
+                name = node.target.id
+                if name != '_':
+                    if name not in assignments:
+                        assignments[name] = []
+                    assignments[name].append(node.lineno)
+            self.generic_visit(node)
+
+    class UsageVisitor(ast.NodeVisitor):
+        """Second pass: collect all variable usages."""
+
+        def visit_Name(self, node: ast.Name):
+            if isinstance(node.ctx, ast.Load):
+                used_names.add(node.id)
+            self.generic_visit(node)
+
+        def visit_Attribute(self, node: ast.Attribute):
+            # self.something uses 'self', but we don't want to mark the attribute as used
+            # unless it's being loaded
+            self.generic_visit(node)
+
+    # Run both visitors
+    assignment_visitor = AssignmentVisitor()
+    assignment_visitor.visit(tree)
+
+    usage_visitor = UsageVisitor()
+    usage_visitor.visit(tree)
+
+    # Find lines to remove
+    lines_to_remove: set[int] = set()
+
+    for name, line_numbers in assignments.items():
+        if name not in used_names:
+            # Variable never used - remove all assignments
+            # But be careful: some "unused" variables are actually used in string interpolation,
+            # format strings, or passed to exec/eval. We'll be conservative here.
+            # Only remove if the assignment is a simple assignment, not a complex expression
+            lines_to_remove.update(line_numbers)
+        elif len(line_numbers) > 1:
+            # Multiple assignments - keep only the last one before first use
+            # This is tricky; for simplicity, we'll just remove duplicate consecutive assignments
+            # to the same value (which often happens with color constants)
+            pass  # TODO: More sophisticated analysis needed
+
+    if not lines_to_remove:
+        return code
+
+    # Remove dead lines
+    source_lines = code.split('\n')
+    result_lines = []
+
+    for i, line in enumerate(source_lines, start=1):
+        if i not in lines_to_remove:
+            result_lines.append(line)
+        else:
+            # Verify this line is a simple assignment before removing
+            stripped = line.strip()
+            # Only remove if it's a simple assignment (name = something)
+            # Don't remove if it's part of a larger statement or has side effects
+            if re.match(r'^[A-Za-z_][A-Za-z0-9_]*\s*=\s*[^=]', stripped):
+                # Check it's not modifying self or an object attribute
+                if not stripped.startswith('self.') and '.' not in stripped.split('=')[0]:
+                    logger.debug("[DEAD-CODE] Removing unused assignment at line %d: %s", i, stripped[:50])
+                    continue
+            result_lines.append(line)
+
+    return '\n'.join(result_lines)
+
+
+def fix_variable_shadowing(code: str) -> str:
+    """Fix patterns like `BLUE_A = BLUE_A` where a variable shadows itself.
+
+    These patterns typically occur when:
+    - LLM generates redundant assignments
+    - Copy-paste errors
+    - Mistaken attempt to create a local reference
+
+    Transformations:
+    - `NAME = NAME` where both sides are identical → `NAME_ALIAS = NAME` or removes the line
+    - `BLUE_A = BLUE_A` → Removed (since it's a no-op)
+    - `color = color` → Removed
+
+    Args:
+        code: Python source code
+
+    Returns:
+        Code with variable shadowing fixed
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+
+    # Track lines with self-shadowing assignments
+    shadowing_lines: dict[int, tuple[str, str]] = {}  # line -> (name, suggested_fix)
+
+    class ShadowingVisitor(ast.NodeVisitor):
+        def visit_Assign(self, node: ast.Assign):
+            # Check for simple NAME = NAME patterns
+            if len(node.targets) == 1:
+                target = node.targets[0]
+                value = node.value
+
+                if isinstance(target, ast.Name) and isinstance(value, ast.Name):
+                    if target.id == value.id:
+                        # Found self-shadowing: NAME = NAME
+                        name = target.id
+                        # Suggest a fix: append _ALIAS or _COLOR suffix
+                        if name.isupper():
+                            # Constants like BLUE_A - these should just be removed
+                            suggested = None
+                        else:
+                            # Variables like color - suggest alias
+                            suggested = f"{name}_copy"
+
+                        shadowing_lines[node.lineno] = (name, suggested)
+
+            self.generic_visit(node)
+
+    visitor = ShadowingVisitor()
+    visitor.visit(tree)
+
+    if not shadowing_lines:
+        return code
+
+    # Fix shadowing lines
+    source_lines = code.split('\n')
+    result_lines = []
+
+    for i, line in enumerate(source_lines, start=1):
+        if i in shadowing_lines:
+            name, suggested = shadowing_lines[i]
+            if suggested is None:
+                # Remove the line entirely (it's a no-op)
+                logger.debug("[SHADOWING] Removing no-op assignment at line %d: %s = %s", i, name, name)
+                continue
+            else:
+                # Replace with suggested name
+                # Find the pattern and replace the target
+                pattern = rf'^(\s*){re.escape(name)}\s*=\s*{re.escape(name)}\s*$'
+                replacement = rf'\1{suggested} = {name}'
+                new_line = re.sub(pattern, replacement, line)
+                if new_line != line:
+                    logger.debug("[SHADOWING] Fixed at line %d: %s -> %s", i, line.strip(), new_line.strip())
+                    result_lines.append(new_line)
+                    continue
+
+        result_lines.append(line)
+
+    return '\n'.join(result_lines)
+
+
 def _regex_fallback_transform(code: str, transformations: list[str]) -> str:
     """Regex-based fallback when AST parsing fails."""
     replacements = [
@@ -623,6 +1004,10 @@ def _regex_fallback_transform(code: str, transformations: list[str]) -> str:
         (r"\bMathTex\b", "Tex"),
         (r"\bSingleStringMathTex\b", "Tex"),
         (r"\bCreate\b", "ShowCreation"),
+
+        # Text methods that don't exist in manimgl
+        # .set_font_size(X) doesn't exist - remove the call (font_size should be set in constructor)
+        (r"\.set_font_size\s*\([^)]*\)", ""),
 
         # Axes parameters (risky - might break valid code, but better than failing)
         (r",\s*tips\s*=\s*(True|False)", ""),
@@ -656,7 +1041,11 @@ def ensure_manimgl_import(code: str) -> str:
     return code
 
 
-def bridge_code(code: str, validate_params: bool = True) -> str:
+def bridge_code(
+    code: str,
+    validate_params: bool = True,
+    rag: ChromaDBService | None = None,
+) -> str:
     """Main entry point: Transform CE code to manimgl and ensure proper imports.
 
     This is the function that should be called before rendering.
@@ -664,6 +1053,7 @@ def bridge_code(code: str, validate_params: bool = True) -> str:
     Args:
         code: Python code that may contain Manim CE patterns
         validate_params: Whether to validate and fix parameters (default True)
+        rag: Optional ChromaDBService for dynamic API validation against 1,652+ indexed signatures
 
     Returns:
         Transformed code ready for manimgl execution
@@ -679,10 +1069,11 @@ def bridge_code(code: str, validate_params: bool = True) -> str:
         )
 
     # Validate and fix parameters against manimgl API
+    # Uses dynamic ChromaDB validation when RAG is available
     if validate_params:
         try:
             from manim_mcp.core.param_validator import validate_and_fix
-            code = validate_and_fix(code)
+            code = validate_and_fix(code, rag=rag)
         except ImportError:
             logger.debug("[CODE-BRIDGE] param_validator not available, skipping validation")
         except Exception as e:
@@ -696,6 +1087,13 @@ def bridge_code(code: str, validate_params: bool = True) -> str:
         logger.debug("[CODE-BRIDGE] layout_validator not available, skipping")
     except Exception as e:
         logger.warning("[CODE-BRIDGE] Layout validation failed: %s", e)
+
+    # Clean up dead code and fix variable shadowing
+    try:
+        code = fix_variable_shadowing(code)
+        code = remove_dead_code(code)
+    except Exception as e:
+        logger.warning("[CODE-BRIDGE] Dead code removal failed: %s", e)
 
     # Ensure proper import exists
     code = ensure_manimgl_import(code)

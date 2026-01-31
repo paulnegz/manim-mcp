@@ -63,6 +63,87 @@ Return ONLY the narration text, one sentence per line. Each sentence will corres
         sentences = [s if s.endswith((".", "!", "?")) else s + "." for s in sentences]
         return sentences[:10]  # Max 10 sentences
 
+    async def generate_narration_for_duration(
+        self, prompt: str, target_duration: float, code: str | None = None
+    ) -> list[str]:
+        """Generate narration script from code and comments, paced to fit video duration.
+
+        Args:
+            prompt: Original animation prompt
+            target_duration: Target duration in seconds to fit narration into
+            code: Generated Manim code with comments (primary source for narration)
+
+        Returns:
+            List of sentences paced to fit the duration
+        """
+        # Estimate ~150 words per minute for natural speech = 2.5 words/second
+        # With pauses between sentences, aim for ~2 words/second
+        target_word_count = int(target_duration * 2.0)
+
+        # Calculate sentence count (avg 12 words/sentence)
+        sentence_count = max(2, min(10, target_word_count // 12))
+
+        if code:
+            # Generate narration from code structure and comments
+            response = await self.client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=f"""You are narrating a 3Blue1Brown-style math animation video.
+
+ANIMATION CODE:
+```python
+{code}
+```
+
+ORIGINAL PROMPT: {prompt}
+
+YOUR TASK:
+Read the code above carefully. Based on:
+1. The comments in the code (they describe what's happening)
+2. The animation calls (self.play, ShowCreation, Transform, etc.)
+3. The objects being created and manipulated
+
+Generate a narration script that explains what the viewer SEES on screen.
+
+TIMING CONSTRAINT:
+- Video duration: {target_duration:.1f} seconds
+- Target: ~{target_word_count} words ({sentence_count} sentences)
+- Each sentence matches one visual moment in the animation
+
+RULES:
+- Follow the ORDER of animations in the code
+- Use comments as hints but write natural spoken sentences
+- Describe what appears, moves, transforms on screen
+- Educational, engaging 3Blue1Brown style
+- Don't mention code, variables, or technical implementation
+
+Return ONLY the narration, one sentence per line.""",
+            )
+        else:
+            # Fallback: generate from prompt only
+            response = await self.client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=f"""Create an educational narration script for a math animation video about:
+
+{prompt}
+
+TIMING CONSTRAINT:
+- Video duration: {target_duration:.1f} seconds
+- Target: ~{target_word_count} words ({sentence_count} sentences)
+
+Rules:
+- Write as if narrating a 3Blue1Brown-style video
+- Each sentence describes what's happening visually
+- Natural speaking pace
+- Educational but concise
+
+Return ONLY the narration text, one sentence per line.""",
+            )
+
+        text = response.text.strip()
+        sentences = [s.strip() for s in re.split(r"[.\n]", text) if s.strip()]
+        sentences = [s if s.endswith((".", "!", "?")) else s + "." for s in sentences]
+        return sentences[:sentence_count]
+
     async def text_to_speech(self, text: str) -> tuple[bytes, str]:
         """Convert single sentence to audio bytes using Gemini TTS.
 
@@ -146,6 +227,100 @@ Return ONLY the narration text, one sentence per line. Each sentence will corres
             "audio/pcm": "raw",
         }
         return mime_map.get(base_mime, "wav"), sample_rate
+
+    def stitch_audio_for_duration(
+        self, segments: list[tuple[bytes, str] | Exception], target_duration: float
+    ) -> bytes:
+        """Combine audio segments and adjust to fit target duration.
+
+        If audio is shorter than target: add pauses between sentences
+        If audio is longer than target: speed up slightly (max 1.3x)
+
+        Args:
+            segments: Audio segments from parallel TTS
+            target_duration: Target duration in seconds
+
+        Returns:
+            WAV bytes adjusted to approximately match target duration
+        """
+        # First, stitch without duration constraint to get base audio
+        combined = AudioSegment.empty()
+
+        valid_segments = []
+        for i, segment_data in enumerate(segments):
+            if isinstance(segment_data, Exception):
+                logger.warning("Skipping failed audio segment %d: %s", i, segment_data)
+                continue
+            try:
+                audio_bytes, mime_type = segment_data
+                fmt, sample_rate = self._parse_mime_type(mime_type)
+
+                if fmt == "raw":
+                    audio = AudioSegment.from_raw(
+                        io.BytesIO(audio_bytes),
+                        sample_width=2,
+                        frame_rate=sample_rate,
+                        channels=1,
+                    )
+                else:
+                    audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt)
+
+                valid_segments.append(audio)
+            except Exception as e:
+                logger.warning("Failed to process audio segment %d: %s", i, e)
+
+        if not valid_segments:
+            raise ValueError("No valid audio segments to stitch")
+
+        # Calculate total audio duration without pauses
+        total_audio_ms = sum(len(seg) for seg in valid_segments)
+        target_ms = target_duration * 1000
+
+        # Calculate pause duration to distribute between segments
+        if len(valid_segments) > 1:
+            available_pause_time = target_ms - total_audio_ms
+            pause_per_gap = max(200, min(2000, available_pause_time / (len(valid_segments) - 1)))
+        else:
+            pause_per_gap = 0
+
+        # If audio is too long even with minimal pauses, speed it up
+        min_total = total_audio_ms + (len(valid_segments) - 1) * 200  # 200ms min pause
+        if min_total > target_ms:
+            # Need to speed up - calculate required factor (max 1.3x)
+            speed_factor = min(1.3, min_total / target_ms)
+            logger.info("Speeding up audio by %.2fx to fit target duration", speed_factor)
+            # Speed up by changing frame rate
+            valid_segments = [
+                seg._spawn(seg.raw_data, overrides={
+                    "frame_rate": int(seg.frame_rate * speed_factor)
+                }).set_frame_rate(seg.frame_rate)
+                for seg in valid_segments
+            ]
+            # Recalculate pause time
+            total_audio_ms = sum(len(seg) for seg in valid_segments)
+            if len(valid_segments) > 1:
+                available_pause_time = target_ms - total_audio_ms
+                pause_per_gap = max(200, available_pause_time / (len(valid_segments) - 1))
+
+        # Build final audio with calculated pauses
+        silence = AudioSegment.silent(duration=int(pause_per_gap))
+        for i, audio in enumerate(valid_segments):
+            if i > 0:
+                combined += silence
+            combined += audio
+
+        # If still shorter than target, add silence at end
+        if len(combined) < target_ms:
+            combined += AudioSegment.silent(duration=int(target_ms - len(combined)))
+
+        logger.info(
+            "Audio adjusted: %d segments, %.1fs target, %.1fs result, %.0fms pauses",
+            len(valid_segments), target_duration, len(combined) / 1000, pause_per_gap
+        )
+
+        output = io.BytesIO()
+        combined.export(output, format="wav")
+        return output.getvalue()
 
     def stitch_audio(self, segments: list[tuple[bytes, str] | Exception]) -> bytes:
         """Combine audio segments with pauses, return WAV bytes."""
