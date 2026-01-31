@@ -721,6 +721,7 @@ class AnimationPipeline:
             status=RenderStatus.completed,
             s3_url=output.s3_url,
             s3_object_key=output.s3_object_key,
+            thumbnail_s3_key=output.thumbnail_s3_key,
             file_size_bytes=output.file_size_bytes,
             render_time_seconds=output.render_time_seconds,
             local_path=output.local_path,

@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS renders (
     edit_instructions TEXT,
     s3_url TEXT,
     s3_object_key TEXT,
+    thumbnail_s3_key TEXT,
     file_size_bytes INTEGER,
     duration_seconds REAL,
     width INTEGER,
@@ -38,6 +39,10 @@ CREATE TABLE IF NOT EXISTS renders (
     created_at TEXT NOT NULL,
     completed_at TEXT
 )
+"""
+
+_MIGRATION_ADD_THUMBNAIL_KEY = """
+ALTER TABLE renders ADD COLUMN thumbnail_s3_key TEXT
 """
 
 _CREATE_INDEXES = [
@@ -59,7 +64,20 @@ class RenderTracker:
         await self._db.execute(_CREATE_TABLE)
         for idx_sql in _CREATE_INDEXES:
             await self._db.execute(idx_sql)
+        # Run migrations for existing databases
+        await self._run_migrations()
         await self._db.commit()
+
+    async def _run_migrations(self) -> None:
+        """Run schema migrations for existing databases."""
+        # Check if thumbnail_s3_key column exists
+        cursor = await self._db.execute("PRAGMA table_info(renders)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "thumbnail_s3_key" not in columns:
+            try:
+                await self._db.execute(_MIGRATION_ADD_THUMBNAIL_KEY)
+            except Exception:
+                pass  # Column might already exist
 
     async def close(self) -> None:
         if self._db:
@@ -111,9 +129,9 @@ class RenderTracker:
         allowed_fields = {
             "status", "parent_render_id", "scene_name", "quality", "format",
             "original_prompt", "source_code", "edit_instructions",
-            "s3_url", "s3_object_key", "file_size_bytes", "duration_seconds",
-            "width", "height", "fps", "error_message", "local_path",
-            "render_time_seconds", "code_hash", "completed_at",
+            "s3_url", "s3_object_key", "thumbnail_s3_key", "file_size_bytes",
+            "duration_seconds", "width", "height", "fps", "error_message",
+            "local_path", "render_time_seconds", "code_hash", "completed_at",
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields and v is not None}
 
@@ -188,6 +206,13 @@ class RenderTracker:
 
 
 def _row_to_metadata(row) -> RenderMetadata:
+    # Handle both old DBs (without thumbnail_s3_key) and new ones
+    thumbnail_s3_key = None
+    try:
+        thumbnail_s3_key = row["thumbnail_s3_key"]
+    except (IndexError, KeyError):
+        pass
+
     return RenderMetadata(
         render_id=row["render_id"],
         parent_render_id=row["parent_render_id"],
@@ -200,6 +225,7 @@ def _row_to_metadata(row) -> RenderMetadata:
         edit_instructions=row["edit_instructions"],
         s3_url=row["s3_url"],
         s3_object_key=row["s3_object_key"],
+        thumbnail_s3_key=thumbnail_s3_key,
         file_size_bytes=row["file_size_bytes"],
         width=row["width"],
         height=row["height"],
