@@ -121,6 +121,7 @@ class RenderMetadata(BaseModel):
     edit_instructions: Optional[str] = None
     s3_url: Optional[str] = None
     s3_object_key: Optional[str] = None
+    thumbnail_s3_key: Optional[str] = None
     presigned_url: Optional[str] = None
     thumbnail_url: Optional[str] = None
     file_size_bytes: Optional[int] = None
