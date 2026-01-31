@@ -531,6 +531,12 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"\bconfig\.frame_height\b", "FRAME_HEIGHT"),
         (r"\bconfig\.pixel_width\b", "1920"),
         (r"\bconfig\.pixel_height\b", "1080"),
+
+        # === METHOD FIXES ===
+        # set_stroke_opacity doesn't exist in manimgl - use set_stroke(opacity=X)
+        (r"\.set_stroke_opacity\s*\(\s*([^)]+)\s*\)", r".set_stroke(opacity=\1)"),
+        # set_fill_opacity doesn't exist in manimgl - use set_fill(opacity=X)
+        (r"\.set_fill_opacity\s*\(\s*([^)]+)\s*\)", r".set_fill(opacity=\1)"),
     ]
     for pattern, replacement in post_replacements:
         if re.search(pattern, code):
@@ -997,6 +1003,162 @@ def fix_variable_shadowing(code: str) -> str:
     return '\n'.join(result_lines)
 
 
+def _fix_mixed_quotes(line: str, line_num: int) -> tuple[str, list[str]]:
+    """Fix strings with mixed quote types that cause syntax errors.
+
+    Detects patterns like:
+    - Text("Newton's First Law') - started with " but seems to end with '
+    - Text('Some text with "quotes"') - actually valid, leave alone
+
+    Strategy:
+    1. Find potential string starts (quote after ( or = or ,)
+    2. Track which quote opened the string
+    3. Look for likely string content followed by wrong quote type
+    4. Fix by using the correct closing quote
+
+    Returns:
+        Tuple of (fixed_line, list of fixes applied)
+    """
+    fixes = []
+
+    # Skip lines without both quote types
+    if '"' not in line or "'" not in line:
+        return line, fixes
+
+    # Skip triple-quoted strings
+    if '"""' in line or "'''" in line:
+        return line, fixes
+
+    # Pattern: function call or assignment with string that has mismatched quotes
+    # Look for: FuncName("content') or FuncName('content")
+    # The key insight: a string started with " should end with ", not '
+
+    # Find all potential string openings: ( or = or , followed by quote
+    import re
+
+    # Pattern to find mismatched quote strings in function calls
+    # Match: (["']...[opposite quote])  where content doesn't contain the opening quote
+    patterns = [
+        # ("content') - double quote start, single quote end
+        (r'\(\s*"([^"]*)\'\s*\)', r'("\1")'),
+        # ('content") - single quote start, double quote end
+        (r"\(\s*'([^']*)\"s*\)", r"('\1')"),
+        # r"content') - raw string with mismatch
+        (r'\(\s*r"([^"]*)\'\s*\)', r'(r"\1")'),
+        (r"\(\s*r'([^']*)\"s*\)", r"(r'\1')"),
+        # = "content' - assignment with mismatch
+        (r'=\s*"([^"]*)\'(\s*[,\)\n])', r'="\1"\2'),
+        (r"=\s*'([^']*)\"(\s*[,\)\n])", r"='\1'\2"),
+    ]
+
+    for pattern, replacement in patterns:
+        match = re.search(pattern, line)
+        if match:
+            new_line = re.sub(pattern, replacement, line, count=1)
+            if new_line != line:
+                fixes.append(f"L{line_num}: fixed mismatched quote types")
+                line = new_line
+                break
+
+    # More aggressive fix: detect "text with 'apostrophe' more text')
+    # This is tricky because ' inside "" is valid, but LLM sometimes mixes them up
+    # Look for lines ending with ') or ") where the quotes don't balance
+
+    return line, fixes
+
+
+def _fix_unterminated_strings(line: str, line_num: int) -> tuple[str, list[str]]:
+    """Fix unterminated string literals by tracking which quote opened the string.
+
+    Improved over naive approach:
+    - Tracks which quote type STARTED the string
+    - Closes with the SAME quote type
+    - Handles escaped quotes properly
+    - Handles raw strings (r"..." or r'...')
+
+    Returns:
+        Tuple of (fixed_line, list of fixes applied)
+    """
+    fixes = []
+
+    # Skip triple-quoted strings
+    if '"""' in line or "'''" in line:
+        return line, fixes
+
+    # Parse the line character by character to find string boundaries
+    # Track: (start_pos, quote_char, is_raw)
+    string_starts = []
+    i = 0
+    while i < len(line):
+        char = line[i]
+
+        # Check for raw string prefix
+        is_raw = False
+        if char in 'rRbBfFuU' and i + 1 < len(line) and line[i + 1] in '"\'':
+            is_raw = char.lower() == 'r'
+            i += 1
+            char = line[i]
+
+        if char in '"\'':
+            # Check if this is a triple quote (skip those)
+            if i + 2 < len(line) and line[i:i+3] == char * 3:
+                # Skip past triple quote - find matching end
+                end = line.find(char * 3, i + 3)
+                if end != -1:
+                    i = end + 3
+                else:
+                    i = len(line)
+                continue
+
+            # Check if we're starting or ending a string
+            if not string_starts or string_starts[-1][1] != char:
+                # Starting a new string (or this char doesn't match current string)
+                # Check if we're inside another string
+                if not string_starts:
+                    string_starts.append((i, char, is_raw))
+            else:
+                # Check if this is escaped (if not raw string)
+                escaped = False
+                if not string_starts[-1][2]:  # Not a raw string
+                    # Count preceding backslashes
+                    num_backslashes = 0
+                    j = i - 1
+                    while j >= 0 and line[j] == '\\':
+                        num_backslashes += 1
+                        j -= 1
+                    escaped = num_backslashes % 2 == 1
+
+                if not escaped:
+                    # Closing the string
+                    string_starts.pop()
+
+        i += 1
+
+    # If we have unclosed strings, try to close them
+    if string_starts:
+        start_pos, quote_char, is_raw = string_starts[-1]
+        stripped = line.rstrip()
+
+        # Don't fix if line ends with backslash (continuation)
+        if not stripped.endswith('\\'):
+            # Check if we need to add closing paren too
+            open_parens = stripped.count('(')
+            close_parens = stripped.count(')')
+            needs_close_paren = open_parens > close_parens
+
+            # Build the fix
+            fix_str = quote_char
+            if needs_close_paren:
+                fix_str += ')'
+                fixes.append(f"L{line_num}: closed unterminated {quote_char} string (opened at col {start_pos+1}) and added )")
+            else:
+                fixes.append(f"L{line_num}: closed unterminated {quote_char} string (opened at col {start_pos+1})")
+
+            line = stripped + fix_str + '\n'
+
+    return line, fixes
+
+
 def _regex_fallback_transform(code: str, transformations: list[str]) -> str:
     """Regex-based fallback when AST parsing fails."""
     replacements = [
@@ -1041,6 +1203,163 @@ def ensure_manimgl_import(code: str) -> str:
     return code
 
 
+def sanitize_latex_strings(code: str) -> tuple[str, list[str]]:
+    """Fix common LaTeX string issues that cause syntax errors.
+
+    LLMs often generate malformed strings with:
+    - Unterminated string literals (missing closing quote)
+    - Mixed quote types (started with " but contains unescaped ')
+    - Unbalanced braces in LaTeX
+    - Backslash at end of string causing issues
+
+    Returns:
+        Tuple of (fixed_code, list of fixes applied)
+    """
+    fixes = []
+    lines = code.split('\n')
+    fixed_lines = []
+
+    # Track if we're inside a multi-line string
+    in_multiline = False
+    multiline_quote = None
+
+    for i, line in enumerate(lines):
+        original_line = line
+
+        # Skip if we're in a multi-line string
+        if in_multiline:
+            if multiline_quote and multiline_quote in line:
+                in_multiline = False
+                multiline_quote = None
+            fixed_lines.append(line)
+            continue
+
+        # Check for multi-line string start
+        for quote in ['"""', "'''"]:
+            count = line.count(quote)
+            if count == 1:  # Opening without closing
+                in_multiline = True
+                multiline_quote = quote
+                break
+
+        # Fix 0: Apostrophe-in-text issue (ENHANCED)
+        # LLM writes: TexText('Snell's Law') - apostrophe ends string prematurely
+        # Also: TexText('The proof of Snell's law shows...') - apostrophe in MIDDLE
+        # Python sees: TexText('Snell'  then  s Law')  - broken!
+        # Fix: Find single-quoted strings containing word's pattern ANYWHERE
+        #      and convert outer quotes to double quotes
+        #
+        # Strategy: Find all ('...') patterns and check if content has word's
+
+        # Pattern 1: Simple case - possessive at START: ('Word's ...)
+        apostrophe_match = re.search(r"\('(\w+)'s\s+(.+?)'\s*\)", line)
+        if apostrophe_match:
+            word1 = apostrophe_match.group(1)
+            rest = apostrophe_match.group(2)
+            full_content = f"{word1}'s {rest}"
+            replacement = f'("{full_content}")'
+            line = line[:apostrophe_match.start()] + replacement + line[apostrophe_match.end():]
+            fixes.append(f"L{i+1}: fixed apostrophe-in-text with double quotes")
+            fixed_lines.append(line)
+            continue
+
+        # Pattern 2: Possessive ANYWHERE in string: ('... word's ...')
+        # Find single-quoted strings and check for internal possessives
+        # Match: opening paren + single quote + content + single quote + closing paren
+        # But content contains word's pattern
+        sq_string_match = re.search(r"\('([^']*\w's[^']*)'\s*\)", line)
+        if sq_string_match:
+            content = sq_string_match.group(1)
+            # Verify it has a possessive pattern (word followed by 's)
+            if re.search(r"\w's\s", content) or re.search(r"\w's$", content):
+                replacement = f'("{content}")'
+                line = line[:sq_string_match.start()] + replacement + line[sq_string_match.end():]
+                fixes.append(f"L{i+1}: fixed mid-string apostrophe with double quotes")
+                fixed_lines.append(line)
+                continue
+
+        # Pattern 3: Single-quoted string WITHOUT parens but with possessive
+        # e.g., label = 'Snell's Law'  or  title='Fermat's Principle'
+        # Match: = 'content with word's' or , 'content with word's'
+        bare_sq_match = re.search(r"([=,]\s*)'([^']*\w's[^']*)'\s*([,\)\]]|$)", line)
+        if bare_sq_match:
+            prefix = bare_sq_match.group(1)  # = or , with space
+            content = bare_sq_match.group(2)
+            suffix = bare_sq_match.group(3)
+            if re.search(r"\w's\s", content) or re.search(r"\w's$", content):
+                replacement = f'{prefix}"{content}"{suffix}'
+                line = line[:bare_sq_match.start()] + replacement + line[bare_sq_match.end():]
+                fixes.append(f"L{i+1}: fixed bare apostrophe string")
+                fixed_lines.append(line)
+                continue
+
+        # Fix 0.5: Mixed quote detection and repair (NEW - more robust)
+        # Detect strings that start with one quote type but seem to end with another
+        # e.g., Text("Newton's First Law') - started with " but has unmatched '
+        # Strategy: Parse the line to find properly opened strings and fix mismatched closers
+        line, mixed_fixes = _fix_mixed_quotes(line, i + 1)
+        if mixed_fixes:
+            fixes.extend(mixed_fixes)
+            fixed_lines.append(line)
+            continue
+
+        # Fix 1: Unterminated single-line strings (IMPROVED)
+        # Now tracks which quote type STARTED the string to close with the SAME type
+        line, unterminated_fixes = _fix_unterminated_strings(line, i + 1)
+        if unterminated_fixes:
+            fixes.extend(unterminated_fixes)
+
+        # Fix 2: Unbalanced braces in r-strings (LaTeX)
+        # Only for lines that look like Tex/TexText calls with r-strings
+        if re.search(r'(Tex|TexText|MathTex)\s*\(\s*r["\']', line):
+            # Count braces in the string portion
+            match = re.search(r'r(["\'])(.*?)\1', line)
+            if match:
+                string_content = match.group(2)
+                open_braces = string_content.count('{')
+                close_braces = string_content.count('}')
+
+                if open_braces > close_braces:
+                    # Add missing closing braces
+                    diff = open_braces - close_braces
+                    quote = match.group(1)
+                    end_pos = match.end() - 1  # Before closing quote
+                    line = line[:end_pos] + '}' * diff + line[end_pos:]
+                    fixes.append(f"L{i+1}: added {diff} missing closing braces in LaTeX")
+                elif close_braces > open_braces:
+                    # Remove extra closing braces (less common, but handle it)
+                    diff = close_braces - open_braces
+                    # Remove from end of string content
+                    fixed_content = string_content
+                    for _ in range(diff):
+                        last_brace = fixed_content.rfind('}')
+                        if last_brace >= 0:
+                            fixed_content = fixed_content[:last_brace] + fixed_content[last_brace+1:]
+                    line = line.replace(string_content, fixed_content)
+                    fixes.append(f"L{i+1}: removed {diff} extra closing braces in LaTeX")
+
+        # Fix 3: Backslash at end of line inside string (common LLM error)
+        # This creates a line continuation that breaks the string
+        stripped = line.rstrip()
+        if stripped.endswith('\\') and not stripped.endswith('\\\\'):
+            # Check if we're likely in a string context
+            quote_count = stripped.count('"') + stripped.count("'")
+            if quote_count % 2 == 1:  # Inside a string
+                # Remove the trailing backslash
+                line = stripped[:-1] + '\n'
+                fixes.append(f"L{i+1}: removed trailing backslash in string")
+
+        fixed_lines.append(line)
+
+    fixed_code = '\n'.join(fixed_lines)
+
+    if fixes:
+        logger.info("[LATEX-SANITIZER] Applied %d fixes: %s",
+                   len(fixes), "; ".join(fixes[:3]) + ("..." if len(fixes) > 3 else ""))
+
+    return fixed_code, fixes
+
+
 def bridge_code(
     code: str,
     validate_params: bool = True,
@@ -1058,6 +1377,13 @@ def bridge_code(
     Returns:
         Transformed code ready for manimgl execution
     """
+    # First, sanitize LaTeX strings to fix common syntax errors
+    # This runs BEFORE AST parsing to fix unterminated strings, unbalanced braces, etc.
+    try:
+        code, latex_fixes = sanitize_latex_strings(code)
+    except Exception as e:
+        logger.warning("[CODE-BRIDGE] LaTeX sanitization failed: %s", e)
+
     # Transform CE patterns to manimgl
     code, transformations = transform_ce_to_manimgl(code)
 

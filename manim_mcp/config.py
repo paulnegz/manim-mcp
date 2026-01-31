@@ -44,7 +44,7 @@ class ManimMCPConfig(BaseSettings):
     manim_executable: str = "manimgl"
     default_quality: DefaultQuality = DefaultQuality.medium
     default_format: DefaultFormat = DefaultFormat.mp4
-    render_timeout: int = 180
+    render_timeout: int = 360
     max_concurrent_renders: int = 4
 
     tracker_db_path: str = "renders.db"
@@ -104,5 +104,5 @@ class ManimMCPConfig(BaseSettings):
     # Audio / TTS settings
     tts_model: str = "gemini-2.5-flash-preview-tts"
     tts_voice: str = "Kore"  # Clear, professional voice for education
-    tts_pause_ms: int = 400  # Pause between sentences
+    tts_pause_ms: int = 1500  # Pause between sentences (1.5 seconds)
     tts_max_concurrent: int = 5  # Max parallel TTS requests

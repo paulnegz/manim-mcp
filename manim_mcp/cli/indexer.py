@@ -587,6 +587,15 @@ async def cmd_index_api(
             class_name = parts[0] if len(parts) > 1 else None
             method_name_str = parts[-1]
 
+            # Build required params section if present
+            required_section = ""
+            required_params = param_info.get("required", [])
+            if required_params:
+                required_section = f"""
+## Required Parameters (MUST be provided!)
+{', '.join(required_params)}
+"""
+
             doc = f"""# {full_name}
 
 ## Valid Parameters
@@ -594,9 +603,10 @@ async def cmd_index_api(
 
 ## Invalid Parameters (CE-only, don't use)
 {', '.join(param_info['invalid'])}
-
+{required_section}
 ## Notes
 These parameters are verified to work with manimgl. Do NOT use the invalid parameters - they will cause errors.
+{f"IMPORTANT: {', '.join(required_params)} are REQUIRED and must be provided!" if required_params else ""}
 """
             meta = {
                 "id": full_name,
@@ -605,6 +615,7 @@ These parameters are verified to work with manimgl. Do NOT use the invalid param
                 "class_name": class_name,
                 "valid_params": ",".join(param_info["valid"]),
                 "invalid_params": ",".join(param_info["invalid"]),
+                "required_params": ",".join(required_params),  # Add required params
                 "is_verified": True,
             }
 

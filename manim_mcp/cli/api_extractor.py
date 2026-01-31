@@ -339,10 +339,14 @@ def get_known_manimgl_parameters() -> dict[str, dict[str, list[str]]]:
     This is a hardcoded fallback for critical methods where we know
     the exact parameters, even if AST extraction misses them.
 
+    IMPORTANT: Entries here get `is_verified=True` status in ChromaDB,
+    making them prioritized during RAG search for parameter validation.
+
     Returns:
         Dict mapping "Class.method" -> {"valid": [params], "invalid": [params]}
     """
     return {
+        # === AXES & COORDINATE SYSTEMS ===
         "Axes.get_riemann_rectangles": {
             "valid": ["graph", "x_range", "dx", "input_sample_type", "fill_opacity", "colors", "stroke_width", "stroke_color", "negative_color", "stroke_background", "show_signed_area"],
             "invalid": ["n_rects", "color", "fill_color", "opacity", "sample_type", "riemann_sum_type"],
@@ -366,6 +370,149 @@ def get_known_manimgl_parameters() -> dict[str, dict[str, list[str]]]:
         "NumberPlane.__init__": {
             "valid": ["x_range", "y_range", "width", "height", "axis_config", "background_line_style", "faded_line_style", "faded_line_ratio"],
             "invalid": ["x_length", "y_length", "tips", "include_numbers"],
+        },
+
+        # === VECTOR FIELDS (REQUIRE coordinate_system!) ===
+        "VectorField.__init__": {
+            "valid": ["func", "coordinate_system", "density", "magnitude_range", "color",
+                      "color_map_name", "color_map", "stroke_opacity", "stroke_width",
+                      "tip_width_ratio", "tip_len_to_width", "max_vect_len",
+                      "max_vect_len_to_step_size", "flat_stroke", "norm_to_opacity_func"],
+            "invalid": [],
+            "required": ["func", "coordinate_system"],  # Mark required params
+        },
+        "StreamLines.__init__": {
+            "valid": ["func", "coordinate_system", "density", "n_repeats", "noise_factor",
+                      "solution_time", "dt", "arc_len", "max_time_steps", "n_samples_per_line",
+                      "cutoff_norm", "stroke_width", "stroke_color", "stroke_opacity",
+                      "color_by_magnitude", "magnitude_range", "taper_stroke_width", "color_map"],
+            "invalid": [],
+            "required": ["func", "coordinate_system"],
+        },
+        "TimeVaryingVectorField.__init__": {
+            "valid": ["time_func", "coordinate_system"],
+            "invalid": [],
+            "required": ["time_func", "coordinate_system"],
+        },
+
+        # === GEOMETRY PRIMITIVES ===
+        "Dot.__init__": {
+            "valid": ["point", "radius", "stroke_color", "stroke_width", "fill_opacity", "fill_color"],
+            "invalid": ["color"],  # Common mistake: use fill_color, not color
+        },
+        "SmallDot.__init__": {
+            "valid": ["point", "radius"],
+            "invalid": [],
+        },
+        "Arrow.__init__": {
+            "valid": ["start", "end", "buff", "path_arc", "fill_color", "fill_opacity",
+                      "stroke_width", "thickness", "tip_width_ratio", "tip_angle",
+                      "max_tip_length_to_length_ratio", "max_width_to_length_ratio"],
+            "invalid": ["color"],  # Use fill_color
+        },
+        "Vector.__init__": {
+            "valid": ["direction", "buff"],
+            "invalid": [],
+        },
+        "Line.__init__": {
+            "valid": ["start", "end", "stroke_color", "stroke_width", "path_arc", "buff"],
+            "invalid": ["color"],  # Use stroke_color
+        },
+        "Circle.__init__": {
+            "valid": ["radius", "arc_center", "start_angle", "angle", "n_components",
+                      "stroke_color", "stroke_width", "fill_color", "fill_opacity"],
+            "invalid": ["color"],  # Use stroke_color or fill_color
+        },
+        "Rectangle.__init__": {
+            "valid": ["width", "height", "stroke_color", "stroke_width", "fill_color", "fill_opacity"],
+            "invalid": ["color"],
+        },
+        "Square.__init__": {
+            "valid": ["side_length", "stroke_color", "stroke_width", "fill_color", "fill_opacity"],
+            "invalid": ["color"],
+        },
+
+        # === 3D SURFACES ===
+        "ParametricSurface.__init__": {
+            "valid": ["uv_func", "u_range", "v_range", "resolution", "color", "opacity"],
+            "invalid": [],
+            "required": ["uv_func"],
+        },
+        "Surface.__init__": {
+            "valid": ["u_range", "v_range", "resolution", "color", "opacity",
+                      "gloss", "shadow", "prefered_creation_axis"],
+            "invalid": [],
+        },
+        "Sphere.__init__": {
+            "valid": ["radius", "u_range", "v_range", "resolution"],
+            "invalid": [],
+        },
+
+        # === TEXT & LABELS ===
+        "Tex.__init__": {
+            "valid": ["tex_string", "color", "font_size", "alignment", "isolate", "tex_to_color_map"],
+            "invalid": ["tex_environment"],  # CE-only
+        },
+        "TexText.__init__": {
+            "valid": ["text", "color", "font_size", "alignment"],
+            "invalid": [],
+        },
+        "Text.__init__": {
+            "valid": ["text", "font", "font_size", "color", "line_spacing", "slant", "weight"],
+            "invalid": ["size"],  # Use font_size
+        },
+
+        # === GROUPS & CONTAINERS ===
+        "VGroup.__init__": {
+            "valid": [],  # Accepts *vmobjects
+            "invalid": [],
+        },
+        "Group.__init__": {
+            "valid": [],  # Accepts *mobjects
+            "invalid": [],
+        },
+
+        # === ARCS & CURVES ===
+        "Arc.__init__": {
+            "valid": ["start_angle", "angle", "radius", "n_components", "arc_center",
+                      "stroke_color", "stroke_width", "fill_color", "fill_opacity"],
+            "invalid": ["color"],  # Use stroke_color
+        },
+        "ArcBetweenPoints.__init__": {
+            "valid": ["start", "end", "angle", "stroke_color", "stroke_width"],
+            "invalid": [],
+        },
+        "CurvedArrow.__init__": {
+            "valid": ["start_point", "end_point", "angle"],
+            "invalid": [],
+        },
+
+        # === COORDINATE SYSTEMS (additional) ===
+        "ComplexPlane.__init__": {
+            # Inherits from NumberPlane
+            "valid": ["x_range", "y_range", "width", "height", "axis_config",
+                      "background_line_style", "faded_line_style", "faded_line_ratio"],
+            "invalid": ["x_length", "y_length"],
+        },
+        "ThreeDAxes.__init__": {
+            "valid": ["x_range", "y_range", "z_range", "width", "height", "depth",
+                      "axis_config", "x_axis_config", "y_axis_config", "z_axis_config"],
+            "invalid": ["x_length", "y_length", "z_length"],
+        },
+
+        # === TRANSFORMS & ANIMATIONS ===
+        "Transform.__init__": {
+            "valid": ["mobject", "target_mobject", "path_arc", "path_arc_axis",
+                      "path_func", "replace_mobject_with_target_in_scene"],
+            "invalid": [],
+        },
+        "FadeIn.__init__": {
+            "valid": ["mobject", "shift", "scale", "lag_ratio"],
+            "invalid": ["target_position"],  # CE-only
+        },
+        "FadeOut.__init__": {
+            "valid": ["mobject", "shift", "scale", "lag_ratio"],
+            "invalid": ["target_position"],
         },
     }
 
