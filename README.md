@@ -11,7 +11,7 @@ Works as a **CLI tool**, an **LLM-powered agent**, or an **MCP server** for inte
 | `manim-mcp gen "Transform a blue circle into a red square"` | `manim-mcp gen "A 3D cube rotating. Use ThreeDScene."` |
 | ![Circle to Square](assets/circle_to_square.gif) | ![Rotating Cube](assets/rotating_cube_preview.gif) |
 
-**[Watch 20 example animations on YouTube](https://www.youtube.com/playlist?list=PLYfSs9pitF8Or8_cjhUaXh_sTSuJqskGD)**
+**[Watch 20+ example animations on YouTube](https://www.youtube.com/playlist?list=PLYfSs9pitF8Or8_cjhUaXh_sTSuJqskGD)**
 
 ## Features
 
