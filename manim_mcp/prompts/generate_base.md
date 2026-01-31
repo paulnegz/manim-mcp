@@ -73,24 +73,33 @@ LAYOUT - Avoid overlapping:
 
 {latex_patterns}
 
+COMMENTS (REQUIRED FOR NARRATION):
+Every animation step MUST have a comment describing what happens visually.
+Comments are used to generate audio narration - describe what the viewer SEES.
+
+Good comments:
+- # Draw the right triangle - foundation of Pythagorean theorem
+- # Squares form on each side of the triangle
+- # Highlight: the two smaller areas equal the large area
+
 EXAMPLE STRUCTURE:
 ```
 class ConceptName(Scene):
     def construct(self):
-        # Phase 1: Establish
+        # Introduce the concept with a title
         title = TexText("Title").to_edge(UP)
         self.play(Write(title))
         self.wait(0.5)
 
-        # Phase 2: Build (progressive reveal)
+        # Create three shapes arranged side by side
         elements = VGroup(Circle(), Square(), Triangle())
         elements.arrange(RIGHT, buff=0.5)
         self.play(LaggedStart(*[ShowCreation(e) for e in elements], lag_ratio=0.3))
 
-        # Phase 3: Insight (slow down, highlight)
+        # Highlight the square - this is the key element
         self.play(Indicate(elements[1], color=YELLOW), run_time=1.5)
 
-        # Phase 4: Resolve
+        # Bring shapes together at center for finale
         self.play(FadeOut(title), elements.animate.move_to(ORIGIN))
         self.wait(2)
 ```
@@ -99,5 +108,10 @@ CRITICAL API RULES:
 - ONLY use documented manimgl parameters
 - Animation classes accept: mobject, run_time, rate_func
 - Do NOT invent parameters - if unsure, omit them
+
+DEPRECATED PATTERNS - NEVER USE:
+- ✗ `CONFIG = {{...}}` class attribute (BROKEN in manimgl - doesn't create self.attributes)
+- ✗ `self.x_range`, `self.y_range` etc from CONFIG (use local variables instead)
+- ✓ Define ranges directly: `x_range = [-3, 3, 1]` then `Axes(x_range=x_range, ...)`
 
 Return ONLY the Python code. No markdown fences. No explanations.

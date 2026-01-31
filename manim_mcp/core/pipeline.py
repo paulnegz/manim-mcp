@@ -49,6 +49,7 @@ class RenderParams:
     save_last_frame: bool = False
     audio: bool = False
     voice: str | None = None
+    video_speed: float = 0.60  # Slow down video before mixing with audio (0.60 = 60% speed)
 
 
 class AnimationPipeline:
@@ -102,28 +103,11 @@ class AnimationPipeline:
                 await progress_callback(stage, pct)
 
         try:
-            # 0. Generate narration script FIRST if audio requested (for code-audio sync)
-            narration_script = None
-            audio_task = None
-            if params.audio and self.tts:
-                await report("generating", 3)
-                logger.info("Generating narration script first for code-audio sync")
-                narration_script = await self.tts.generate_narration_script(prompt)
-                logger.info("Generated %d-sentence narration script", len(narration_script))
-
-                # Start TTS generation in parallel with code generation
-                # TTS internally parallelizes across sentences
-                audio_task = asyncio.create_task(
-                    self._generate_audio_from_script(narration_script, render_id, params.voice)
-                )
-                logger.info("Started parallel TTS generation")
-
-            # 1. Generate code via LLM, guided by narration script (0-20%)
-            # Runs in parallel with TTS if audio requested
+            # 1. Generate code via LLM (no narration constraint - video drives audio)
             await report("generating", 5)
             await self.tracker.update_render(render_id, status=RenderStatus.generating)
             await report("generating", 10)
-            code = await self._generate_and_validate(prompt, narration_script)
+            code = await self._generate_and_validate(prompt, narration_script=None)
             await report("validating", 20)
 
             # 2. Store generated code (20-25%)
@@ -134,22 +118,53 @@ class AnimationPipeline:
             )
             await report("preparing", 25)
 
-            # 3. Render video (25-60%)
+            # 3. Render video AND generate audio in PARALLEL (25-80%)
             await report("rendering", 30)
+
+            # Start audio generation in parallel if requested
+            audio_task = None
+            if params.audio and self.tts:
+                audio_task = asyncio.create_task(
+                    self._generate_audio_from_code(code, prompt, render_id, params.voice)
+                )
+                logger.info("Started parallel: video render + audio generation")
+
+            # Render video
             result = await self._render_with_retries(render_id, code, scene_name, params, prompt)
             await report("uploading", 60)
 
-            # 4. Wait for parallel TTS and mix audio (60-90%)
+            # Wait for audio and mix (60-90%)
             has_audio = False
             if audio_task and result.local_path:
                 try:
                     await report("generating_audio", 65)
-                    # Await the parallel TTS task
-                    audio_path = await audio_task
-                    await report("mixing_audio", 80)
-                    if audio_path:
+                    audio_segments, narration_script = await audio_task
+
+                    if audio_segments:
+                        await report("mixing_audio", 75)
+
+                        # Get video duration and stitch audio to match
+                        video_duration = await self._get_media_duration(result.local_path)
+                        target_audio_duration = video_duration / params.video_speed if params.video_speed > 0 else video_duration
+                        logger.info(
+                            "Video: %.1fs, target audio (after slowdown): %.1fs",
+                            video_duration, target_audio_duration
+                        )
+
+                        # Stitch audio segments paced to video duration
+                        audio_data = self.tts.stitch_audio_for_duration(audio_segments, target_audio_duration)
+
+                        # Save audio
+                        import tempfile
+                        audio_dir = os.path.join(tempfile.gettempdir(), f"manim_mcp_{render_id}")
+                        os.makedirs(audio_dir, exist_ok=True)
+                        audio_path = os.path.join(audio_dir, "narration.wav")
+                        with open(audio_path, "wb") as f:
+                            f.write(audio_data)
+
+                        await report("mixing_audio", 80)
                         mixed_path = await self._mix_audio_video(
-                            result.local_path, audio_path
+                            result.local_path, audio_path, params.video_speed
                         )
                         result.local_path = mixed_path
                         has_audio = True
@@ -170,6 +185,25 @@ class AnimationPipeline:
                 except Exception as e:
                     logger.warning("Audio generation failed, continuing without audio: %s", e)
 
+            # Always slow down video (even without audio)
+            if not has_audio and result.local_path and params.video_speed != 1.0:
+                await report("processing_video", 85)
+                slowed_path = await self._slow_down_video(result.local_path, params.video_speed)
+                if slowed_path != result.local_path:
+                    result.local_path = slowed_path
+                    # Re-upload slowed video to S3
+                    if self.storage.available:
+                        filename = os.path.basename(slowed_path)
+                        s3_key = f"{self.config.s3_prefix}{render_id}/{filename}"
+                        try:
+                            result.s3_url = await self.storage.upload_file(slowed_path, s3_key)
+                            result.s3_object_key = s3_key
+                            result.url = await self.storage.generate_presigned_url(s3_key)
+                            result.file_size_bytes = os.path.getsize(slowed_path)
+                            logger.info("Uploaded slowed video to S3: %s", s3_key)
+                        except Exception as e:
+                            logger.warning("Failed to upload slowed video: %s", e)
+
             await report("finalizing", 95)
 
             # Self-index successful render for RAG
@@ -183,7 +217,9 @@ class AnimationPipeline:
                 render_id=render_id,
                 status=RenderStatus.completed,
                 url=result.url or result.local_path,
+                s3_object_key=result.s3_object_key,
                 thumbnail_url=result.thumbnail_url,
+                thumbnail_s3_key=result.thumbnail_s3_key,
                 format=result.format,
                 quality=result.quality,
                 file_size_bytes=result.file_size_bytes,
@@ -238,28 +274,11 @@ class AnimationPipeline:
                 await progress_callback(stage, pct)
 
         try:
-            # 0. Generate narration script FIRST if audio requested (for code-audio sync)
-            narration_script = None
-            audio_task = None
-            if params.audio and self.tts:
-                await report("generating", 3)
-                logger.info("Generating narration script first for code-audio sync")
-                narration_script = await self.tts.generate_narration_script(prompt)
-                logger.info("Generated %d-sentence narration script", len(narration_script))
-
-                # Start TTS generation in parallel with code generation
-                # TTS internally parallelizes across sentences
-                audio_task = asyncio.create_task(
-                    self._generate_audio_from_script(narration_script, render_id, params.voice)
-                )
-                logger.info("Started parallel TTS generation")
-
-            # 1. Run multi-agent pipeline (0-20%)
-            # Runs in parallel with TTS if audio requested
+            # 1. Run multi-agent pipeline (no narration constraint - video drives audio)
             await report("analyzing", 5)
             await self.tracker.update_render(render_id, status=RenderStatus.generating)
             await report("planning", 10)
-            pipeline_result = await self.orchestrator.generate_advanced(prompt, narration_script)
+            pipeline_result = await self.orchestrator.generate_advanced(prompt, narration_script=None)
             code = pipeline_result.generated_code
             await report("generating", 15)
 
@@ -275,22 +294,53 @@ class AnimationPipeline:
             )
             await report("preparing", 25)
 
-            # 4. Render video (25-60%)
+            # 4. Render video AND generate audio in PARALLEL (25-80%)
             await report("rendering", 30)
+
+            # Start audio generation in parallel if requested
+            audio_task = None
+            if params.audio and self.tts:
+                audio_task = asyncio.create_task(
+                    self._generate_audio_from_code(code, prompt, render_id, params.voice)
+                )
+                logger.info("Started parallel: video render + audio generation")
+
+            # Render video
             result = await self._render_and_upload(render_id, code, scene_name, params)
             await report("uploading", 60)
 
-            # 5. Wait for parallel TTS and mix audio (60-90%)
+            # Wait for audio and mix (60-90%)
             has_audio = False
             if audio_task and result.local_path:
                 try:
                     await report("generating_audio", 65)
-                    # Await the parallel TTS task
-                    audio_path = await audio_task
-                    await report("mixing_audio", 80)
-                    if audio_path:
+                    audio_segments, narration_script = await audio_task
+
+                    if audio_segments:
+                        await report("mixing_audio", 75)
+
+                        # Get video duration and stitch audio to match
+                        video_duration = await self._get_media_duration(result.local_path)
+                        target_audio_duration = video_duration / params.video_speed if params.video_speed > 0 else video_duration
+                        logger.info(
+                            "Video: %.1fs, target audio (after slowdown): %.1fs",
+                            video_duration, target_audio_duration
+                        )
+
+                        # Stitch audio segments paced to video duration
+                        audio_data = self.tts.stitch_audio_for_duration(audio_segments, target_audio_duration)
+
+                        # Save audio
+                        import tempfile
+                        audio_dir = os.path.join(tempfile.gettempdir(), f"manim_mcp_{render_id}")
+                        os.makedirs(audio_dir, exist_ok=True)
+                        audio_path = os.path.join(audio_dir, "narration.wav")
+                        with open(audio_path, "wb") as f:
+                            f.write(audio_data)
+
+                        await report("mixing_audio", 80)
                         mixed_path = await self._mix_audio_video(
-                            result.local_path, audio_path
+                            result.local_path, audio_path, params.video_speed
                         )
                         result.local_path = mixed_path
                         has_audio = True
@@ -311,6 +361,25 @@ class AnimationPipeline:
                 except Exception as e:
                     logger.warning("Audio generation failed, continuing without audio: %s", e)
 
+            # Always slow down video (even without audio)
+            if not has_audio and result.local_path and params.video_speed != 1.0:
+                await report("processing_video", 85)
+                slowed_path = await self._slow_down_video(result.local_path, params.video_speed)
+                if slowed_path != result.local_path:
+                    result.local_path = slowed_path
+                    # Re-upload slowed video to S3
+                    if self.storage.available:
+                        filename = os.path.basename(slowed_path)
+                        s3_key = f"{self.config.s3_prefix}{render_id}/{filename}"
+                        try:
+                            result.s3_url = await self.storage.upload_file(slowed_path, s3_key)
+                            result.s3_object_key = s3_key
+                            result.url = await self.storage.generate_presigned_url(s3_key)
+                            result.file_size_bytes = os.path.getsize(slowed_path)
+                            logger.info("Uploaded slowed video to S3: %s", s3_key)
+                        except Exception as e:
+                            logger.warning("Failed to upload slowed video: %s", e)
+
             await report("finalizing", 95)
 
             # Self-index successful render
@@ -324,7 +393,9 @@ class AnimationPipeline:
                 render_id=render_id,
                 status=RenderStatus.completed,
                 url=result.url or result.local_path,
+                s3_object_key=result.s3_object_key,
                 thumbnail_url=result.thumbnail_url,
+                thumbnail_s3_key=result.thumbnail_s3_key,
                 format=result.format,
                 quality=result.quality,
                 file_size_bytes=result.file_size_bytes,
@@ -400,7 +471,9 @@ class AnimationPipeline:
                 render_id=new_id,
                 status=RenderStatus.completed,
                 url=result.url or result.local_path,
+                s3_object_key=result.s3_object_key,
                 thumbnail_url=result.thumbnail_url,
+                thumbnail_s3_key=result.thumbnail_s3_key,
                 format=result.format,
                 quality=result.quality,
                 file_size_bytes=result.file_size_bytes,
@@ -418,6 +491,74 @@ class AnimationPipeline:
             raise
 
     # ── Internal ───────────────────────────────────────────────────────
+
+    async def _get_rag_fix_hints(self, error_msg: str) -> list[str]:
+        """Query RAG for error patterns + API signatures to help fix."""
+        if not self.rag:
+            return []
+
+        hints = []
+        import re
+
+        # Extract class/method names from error - handle multiple patterns
+        # IMPORTANT: Order matters! More specific patterns (AttributeError, TypeError)
+        # must come BEFORE generic patterns to avoid matching traceback lines like "sys.exit("
+        patterns = [
+            # Specific error patterns first
+            r"'(\w+)' object has no attribute '(\w+)'",  # AttributeError - most specific
+            r"(\w+)\(\) got an unexpected keyword argument '(\w+)'",  # TypeError with method
+            r"(\w+)\(.*unexpected.*argument.*'(\w+)'",  # unexpected argument variant
+            r"(\w+)\.__init__\(\)",  # __init__ error
+            # Generic pattern last (can match traceback noise like "sys.exit(")
+            # Only use if nothing else matched
+        ]
+
+        class_name = None
+        method_name = None
+        for pattern in patterns:
+            match = re.search(pattern, error_msg)
+            if match:
+                class_name = match.group(1)
+                if match.lastindex >= 2:
+                    method_name = match.group(2)
+                break
+
+        # If no specific pattern matched, try the generic one but filter out common false positives
+        if not class_name:
+            generic_match = re.search(r"(\w+)\.(\w+)\(", error_msg)
+            if generic_match:
+                potential_class = generic_match.group(1)
+                # Filter out common false positives from tracebacks
+                if potential_class not in ("sys", "os", "re", "ast", "json", "logging", "asyncio", "self"):
+                    class_name = potential_class
+                    method_name = generic_match.group(2)
+
+        if class_name:
+            logger.info("[RAG-RETRY] Looking up API for: %s", class_name)
+            sigs = await self.rag.search_api_signatures(class_name, n_results=2)
+            for sig in sigs:
+                params = sig.get("metadata", {}).get("parameters", "")
+                if params:
+                    hints.append(f"[API] {class_name} valid params: {params[:300]}")
+                    logger.info("[RAG-RETRY] Found API signature for %s", class_name)
+                    break
+
+        # Search error patterns for known fixes
+        similar = await self.rag.search_error_patterns(error_msg[:500], n_results=2)
+        logger.info("[RAG-RETRY] Found %d similar error patterns", len(similar))
+        for pattern in similar:
+            fix = pattern.get("metadata", {}).get("fix")
+            if fix:
+                hints.append(f"[FIX] Similar error fixed by: {fix[:300]}")
+                logger.info("[RAG-RETRY] Found fix hint!")
+                break
+
+        # If no hints found, add a generic hint about CONFIG pattern
+        if not hints and "has no attribute" in error_msg:
+            hints.append("[HINT] Don't use CONFIG dict pattern. Define variables directly in construct().")
+            logger.info("[RAG-RETRY] Added CONFIG pattern hint")
+
+        return hints
 
     async def _render_with_retries(
         self,
@@ -437,13 +578,14 @@ class AnimationPipeline:
 
         for attempt in range(1, self.config.gemini_max_retries + 1):
             # Transform code using CE→manimgl bridge (for error tracking)
-            transformed_code = bridge_code(current_code)
+            # Pass RAG for dynamic API validation against 1,652+ indexed signatures
+            transformed_code = bridge_code(current_code, rag=self.rag)
 
             try:
                 result = await self._render_and_upload(render_id, current_code, scene_name, params)
                 # If we're on a retry and it succeeded, store the error→fix pattern
                 if previous_error and self.rag:
-                    previous_transformed = bridge_code(previous_code) if previous_code else None
+                    previous_transformed = bridge_code(previous_code, rag=self.rag) if previous_code else None
                     await self.rag.store_error_pattern(
                         error_message=previous_error[:500],
                         code=previous_code[:3000],
@@ -465,14 +607,17 @@ class AnimationPipeline:
                 if attempt < self.config.gemini_max_retries:
                     logger.warning(
                         "Render failed (attempt %d/%d): %s",
-                        attempt, self.config.gemini_max_retries, error_msg[:200]
+                        attempt, self.config.gemini_max_retries, error_msg[:1000]
                     )
-                    # Track error for learning (before fixing)
                     previous_error = error_msg
                     previous_code = current_code
-                    # Ask LLM to fix the code based on runtime error
+
+                    # Enrich error with RAG hints if available
+                    errors = [error_msg[:1500]]
+                    errors.extend(await self._get_rag_fix_hints(error_msg))
+
                     await self.tracker.update_render(render_id, status=RenderStatus.generating)
-                    current_code = await self.llm.fix_code(current_code, [error_msg[:1500]])
+                    current_code = await self.llm.fix_code(current_code, errors)
 
                     # Re-validate and update scene name
                     current_code = await self._validate_with_retries(current_code)
@@ -484,12 +629,12 @@ class AnimationPipeline:
                 else:
                     logger.error(
                         "Render failed after %d attempts: %s",
-                        self.config.gemini_max_retries, error_msg[:500]
+                        self.config.gemini_max_retries, error_msg[:1500]
                     )
                     # Store error pattern for future learning (with both original and transformed)
                     if self.rag:
                         await self.rag.store_error_pattern(
-                            error_message=error_msg[:500],
+                            error_message=error_msg[:1000],
                             code=current_code[:3000],
                             fix=None,  # No fix available yet
                             prompt=prompt[:200] if prompt else None,
@@ -533,7 +678,7 @@ class AnimationPipeline:
                 output.s3_url = await self.storage.upload_file(output.local_path, s3_key)
                 output.s3_object_key = s3_key
                 output.url = await self.storage.generate_presigned_url(s3_key)
-                output.thumbnail_url = await self._generate_thumbnail(
+                output.thumbnail_url, output.thumbnail_s3_key = await self._generate_thumbnail(
                     output.local_path, render_id,
                 )
             except Exception as e:
@@ -593,19 +738,28 @@ The timing and visuals must sync with this script."""
         return await self._validate_with_retries(code)
 
     def _build_rag_context(self, similar_scenes: list[dict]) -> str:
-        """Format RAG results as context for generation."""
+        """Format RAG results as context for generation.
+
+        Shows full code for high-similarity matches to enable close following of patterns.
+        """
         lines = []
         for i, scene in enumerate(similar_scenes[:3], 1):
             meta = scene.get("metadata", {})
+            similarity = scene.get("similarity_score", 0)
             prompt_hint = meta.get("prompt", "")[:100]
             if prompt_hint:
-                lines.append(f"\nExample {i} (prompt: {prompt_hint}):")
+                lines.append(f"\nExample {i} (prompt: {prompt_hint}, similarity: {similarity:.2f}):")
             else:
-                lines.append(f"\nExample {i}:")
-            # Show code snippet (first 800 chars)
-            code = scene.get("content", "")[:800]
+                lines.append(f"\nExample {i} (similarity: {similarity:.2f}):")
+
+            # Show more code for high-similarity matches (up to 3000 chars)
+            # This allows LLM to follow working patterns closely instead of inventing
+            max_chars = 3000 if similarity > 0.7 else 1500
+            code = scene.get("content", "")[:max_chars]
             if code:
                 lines.append(f"```python\n{code}\n```")
+                if similarity > 0.8:
+                    lines.append("**IMPORTANT: This is a highly relevant example. Follow this pattern closely.**")
         return "\n".join(lines)
 
     async def _edit_and_validate(self, original_code: str, instructions: str) -> str:
@@ -643,17 +797,19 @@ The timing and visuals must sync with this script."""
 
         return code
 
-    async def _generate_thumbnail(self, video_path: str, render_id: str) -> str | None:
+    async def _generate_thumbnail(self, video_path: str, render_id: str) -> tuple[str | None, str | None]:
+        """Generate thumbnail and return (presigned_url, s3_key)."""
         if not shutil.which("ffmpeg") or not self.storage.available:
-            return None
+            return None, None
 
         if video_path.endswith(".png"):
             thumb_key = f"{self.config.s3_prefix}{render_id}/thumbnail.png"
             try:
                 await self.storage.upload_file(video_path, thumb_key, "image/png")
-                return await self.storage.generate_presigned_url(thumb_key)
+                url = await self.storage.generate_presigned_url(thumb_key)
+                return url, thumb_key
             except Exception:
-                return None
+                return None, None
 
         import tempfile
         thumb_path = os.path.join(tempfile.gettempdir(), f"{render_id}_thumb.png")
@@ -669,14 +825,15 @@ The timing and visuals must sync with this script."""
             if os.path.exists(thumb_path):
                 thumb_key = f"{self.config.s3_prefix}{render_id}/thumbnail.png"
                 await self.storage.upload_file(thumb_path, thumb_key, "image/png")
-                return await self.storage.generate_presigned_url(thumb_key)
+                url = await self.storage.generate_presigned_url(thumb_key)
+                return url, thumb_key
         except Exception as e:
             logger.debug("Thumbnail generation failed: %s", e)
         finally:
             if os.path.exists(thumb_path):
                 os.unlink(thumb_path)
 
-        return None
+        return None, None
 
     # ── Self-Indexing Hooks ────────────────────────────────────────────
 
@@ -839,7 +996,108 @@ The timing and visuals must sync with this script."""
             if original_voice:
                 self.tts.voice = original_voice
 
-    async def _mix_audio_video(self, video_path: str, audio_path: str) -> str:
+    async def _generate_audio_from_code(
+        self, code: str, prompt: str, render_id: str, voice: str | None = None
+    ) -> tuple[list, list[str]]:
+        """Generate narration and TTS from code in parallel with video render.
+
+        Args:
+            code: Generated Manim code with comments
+            prompt: Original animation prompt
+            render_id: Render ID for logging
+            voice: Optional voice override
+
+        Returns:
+            Tuple of (audio_segments, narration_script) - segments not yet stitched
+        """
+        if not self.tts:
+            return [], []
+
+        original_voice = None
+        if voice:
+            original_voice = self.tts.voice
+            self.tts.voice = voice
+
+        try:
+            # Generate narration script from code (no duration constraint yet)
+            logger.info("Generating narration script from code comments")
+            narration_script = await self.tts.generate_narration_for_duration(
+                prompt, target_duration=30.0, code=code  # Estimate ~30s, will adjust later
+            )
+            logger.info("Generated %d-sentence narration from code", len(narration_script))
+
+            if not narration_script:
+                return [], []
+
+            # Generate TTS for all sentences in parallel
+            logger.info("Generating TTS for %d sentences in parallel", len(narration_script))
+            audio_segments = await self.tts.generate_parallel(narration_script)
+
+            successful = sum(1 for s in audio_segments if not isinstance(s, Exception))
+            logger.info("TTS completed: %d/%d sentences", successful, len(narration_script))
+
+            return audio_segments, narration_script
+
+        finally:
+            if original_voice:
+                self.tts.voice = original_voice
+
+    async def _generate_audio_for_duration(
+        self, script: list[str], render_id: str, target_duration: float, voice: str | None = None
+    ) -> str | None:
+        """Generate narration audio paced to fit target video duration.
+
+        Args:
+            script: Narration script (list of sentences)
+            render_id: Render ID for temp file naming
+            target_duration: Target duration in seconds
+            voice: Optional voice override
+
+        Returns:
+            Path to the generated WAV file, or None if TTS unavailable
+        """
+        if not self.tts:
+            logger.warning("TTS service not available, skipping audio generation")
+            return None
+
+        if not script:
+            logger.warning("No script provided for audio generation")
+            return None
+
+        original_voice = None
+        if voice:
+            original_voice = self.tts.voice
+            self.tts.voice = voice
+
+        try:
+            logger.info("Generating audio for %d sentences, target %.1fs", len(script), target_duration)
+
+            # Generate audio for all sentences in parallel
+            audio_segments = await self.tts.generate_parallel(script)
+
+            successful = sum(1 for s in audio_segments if not isinstance(s, Exception))
+            logger.info("TTS completed: %d/%d sentences successful", successful, len(script))
+
+            # Stitch audio adjusted to fit target duration
+            audio_data = self.tts.stitch_audio_for_duration(audio_segments, target_duration)
+
+            # Save to temp file
+            import tempfile
+            audio_dir = os.path.join(tempfile.gettempdir(), f"manim_mcp_{render_id}")
+            os.makedirs(audio_dir, exist_ok=True)
+            audio_path = os.path.join(audio_dir, "narration.wav")
+
+            with open(audio_path, "wb") as f:
+                f.write(audio_data)
+
+            logger.info("Audio narration (duration-adjusted) saved to %s", audio_path)
+            return audio_path
+
+        finally:
+            if original_voice:
+                self.tts.voice = original_voice
+
+    async def _mix_audio_video(self, video_path: str, audio_path: str, video_speed: float = 0.70) -> str:
         """Mix audio track into video using ffmpeg.
 
         Handles duration mismatch without looping:
@@ -849,6 +1107,7 @@ The timing and visuals must sync with this script."""
         Args:
             video_path: Path to the rendered video
             audio_path: Path to the audio narration
+            video_speed: Speed factor for video (0.75 = 75% speed, slower). Default 0.75.
 
         Returns:
             Path to the output video with audio
@@ -867,24 +1126,36 @@ The timing and visuals must sync with this script."""
         video_duration = await self._get_media_duration(video_path)
         audio_duration = await self._get_media_duration(audio_path)
 
+        # Apply video speed adjustment (0.75 = 75% speed = 1.33x longer duration)
+        # setpts=PTS/speed slows down the video
+        speed_filter = ""
+        adjusted_video_duration = video_duration
+        if video_speed != 1.0 and video_speed > 0:
+            adjusted_video_duration = video_duration / video_speed
+            speed_filter = f"setpts=PTS/{video_speed},"
+            logger.info(
+                "Slowing video to %.0f%% speed: %.1fs -> %.1fs",
+                video_speed * 100, video_duration, adjusted_video_duration
+            )
+
         logger.info(
-            "Mixing audio into video: %s (%.1fs) + %s (%.1fs) -> %s",
-            video_path, video_duration, audio_path, audio_duration, output_path
+            "Mixing audio into video: %s (%.1fs adj) + %s (%.1fs) -> %s",
+            video_path, adjusted_video_duration, audio_path, audio_duration, output_path
         )
 
         # Handle duration mismatch - NEVER loop
         # - Freeze last frame if audio is longer
         # - Pad audio with silence if video is longer
-        if audio_duration > video_duration and video_duration > 0:
+        if audio_duration > adjusted_video_duration and adjusted_video_duration > 0:
             # Audio is longer: freeze on last frame (tpad with stop_mode=clone)
-            pad_duration = audio_duration - video_duration
+            pad_duration = audio_duration - adjusted_video_duration
             logger.info("Freezing last frame for %.1fs to match audio duration", pad_duration)
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y",
                 "-i", video_path,
                 "-i", audio_path,
                 "-filter_complex",
-                f"[0:v]tpad=stop_mode=clone:stop_duration={pad_duration}[v]",
+                f"[0:v]{speed_filter}tpad=stop_mode=clone:stop_duration={pad_duration}[v]",
                 "-map", "[v]",
                 "-map", "1:a",
                 "-c:v", "libx264", "-preset", "fast",
@@ -895,16 +1166,17 @@ The timing and visuals must sync with this script."""
                 stderr=asyncio.subprocess.PIPE,
             )
         else:
-            # Video is longer or equal: pad audio with silence
+            # Video is longer or equal: apply speed filter and pad audio with silence
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y",
                 "-i", video_path,
                 "-i", audio_path,
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-filter_complex", f"[1:a]apad=whole_dur={video_duration}[a]",
-                "-map", "0:v",
+                "-filter_complex",
+                f"[0:v]{speed_filter}null[v];[1:a]apad=whole_dur={adjusted_video_duration}[a]",
+                "-map", "[v]",
                 "-map", "[a]",
+                "-c:v", "libx264", "-preset", "fast",
+                "-c:a", "aac",
                 output_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
@@ -917,6 +1189,54 @@ The timing and visuals must sync with this script."""
             return video_path  # Return original on failure
 
         logger.info("Audio mixed successfully: %s", output_path)
+        return output_path
+
+    async def _slow_down_video(self, video_path: str, video_speed: float = 0.60) -> str:
+        """Slow down video without audio using ffmpeg.
+
+        Args:
+            video_path: Path to the rendered video
+            video_speed: Speed factor (0.60 = 60% speed, slower). Default 0.60.
+
+        Returns:
+            Path to the slowed video
+        """
+        if not shutil.which("ffmpeg"):
+            logger.warning("ffmpeg not found, cannot slow down video")
+            return video_path
+
+        if video_speed == 1.0 or video_speed <= 0:
+            return video_path
+
+        output_path = video_path.replace(".mp4", "_slowed.mp4")
+        if output_path == video_path:
+            base, ext = os.path.splitext(video_path)
+            output_path = f"{base}_slowed{ext}"
+
+        logger.info(
+            "Slowing video to %.0f%% speed: %s -> %s",
+            video_speed * 100, video_path, output_path
+        )
+
+        # Apply speed filter: setpts=PTS/speed slows down the video
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-filter:v", f"setpts=PTS/{video_speed}",
+            "-an",  # No audio
+            "-c:v", "libx264", "-preset", "fast",
+            output_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        _, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            logger.error("ffmpeg slowdown failed: %s", stderr.decode() if stderr else "unknown error")
+            return video_path  # Return original on failure
+
+        logger.info("Video slowed successfully: %s", output_path)
         return output_path
 
     async def _get_media_duration(self, path: str) -> float:

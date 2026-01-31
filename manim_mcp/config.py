@@ -58,7 +58,7 @@ class ManimMCPConfig(BaseSettings):
 
     # Gemini settings
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3-pro-preview"
+    gemini_model: str = "gemini-3-flash-preview"
 
     # Claude settings
     claude_api_key: str = ""

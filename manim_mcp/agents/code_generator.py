@@ -2,13 +2,75 @@
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import logging
+import re
+from typing import TYPE_CHECKING
 
 from manim_mcp.agents.base import BaseAgent
 from manim_mcp.models import ConceptAnalysis, ScenePlan
 from manim_mcp.prompts import get_code_generator_system
 
+if TYPE_CHECKING:
+    from manim_mcp.core.api_graph import ManimAPIGraph
+
 logger = logging.getLogger(__name__)
+
+# Common Manim method/class keywords to extract from prompts
+# Maps common user-facing terms to their actual manimgl API names
+MANIM_KEYWORD_MAP = {
+    # Animations
+    "transform": ["Transform", "ReplacementTransform", "TransformMatchingTex"],
+    "fade": ["FadeIn", "FadeOut", "FadeTransform"],
+    "rotate": ["Rotate", "rotate", "Rotating"],
+    "move": ["shift", "move_to", "next_to"],
+    "write": ["Write", "ShowCreation"],
+    "create": ["ShowCreation", "Create"],
+    "draw": ["ShowCreation", "DrawBorderThenFill"],
+    "animate": ["animate", "Animation"],
+    "morph": ["Transform", "TransformMatchingTex", "ReplacementTransform"],
+    "grow": ["GrowFromCenter", "GrowArrow", "GrowFromPoint"],
+    "indicate": ["Indicate", "ShowPassingFlash", "FlashAround"],
+    "highlight": ["Indicate", "FlashAround", "SurroundingRectangle"],
+    # Mobjects
+    "circle": ["Circle", "Dot", "Annulus"],
+    "square": ["Square", "Rectangle"],
+    "line": ["Line", "Arrow", "DashedLine", "Vector"],
+    "arrow": ["Arrow", "Vector", "GrowArrow"],
+    "dot": ["Dot", "SmallDot"],
+    "text": ["Tex", "TexText", "Text"],
+    "equation": ["Tex", "MathTex"],
+    "formula": ["Tex", "MathTex"],
+    "graph": ["Axes", "get_graph", "NumberPlane"],
+    "plot": ["Axes", "get_graph", "plot"],
+    "axes": ["Axes", "NumberPlane", "CoordinateSystem"],
+    "function": ["get_graph", "FunctionGraph", "ParametricCurve"],
+    "curve": ["ParametricCurve", "get_graph", "CubicBezier"],
+    "vector": ["Vector", "Arrow", "NumberPlane"],
+    "matrix": ["Matrix", "IntegerMatrix", "DecimalMatrix"],
+    "polygon": ["Polygon", "RegularPolygon", "Triangle"],
+    "triangle": ["Triangle", "Polygon"],
+    "group": ["VGroup", "Group"],
+    # Math concepts
+    "integral": ["get_area", "get_riemann_rectangles", "Integral"],
+    "riemann": ["get_riemann_rectangles", "Axes"],
+    "derivative": ["TangentLine", "get_secant_slope_group"],
+    "tangent": ["TangentLine", "get_tangent_line"],
+    "secant": ["get_secant_slope_group", "Line"],
+    "area": ["get_area", "get_area_under_graph", "Polygon"],
+    "limit": ["ValueTracker", "always_redraw"],
+    "series": ["VGroup", "LaggedStartMap"],
+    "sum": ["VGroup", "Tex"],
+    # Advanced
+    "tracker": ["ValueTracker", "always_redraw"],
+    "updater": ["add_updater", "always_redraw", "become"],
+    "trace": ["TracedPath", "add_updater"],
+    "path": ["TracedPath", "ParametricCurve", "VMobject"],
+    "3d": ["ThreeDScene", "Surface", "ThreeDAxes"],
+    "surface": ["Surface", "ParametricSurface"],
+    "camera": ["camera", "set_camera_orientation", "move_camera"],
+}
 
 # Threshold for "very high quality" match - use code directly
 # Lower threshold = more direct use of verified 3b1b code (fewer LLM generation errors)
@@ -17,11 +79,626 @@ DIRECT_USE_THRESHOLD = 0.08  # Keep low - 3b1b code is correct, LLM generation h
 # Minimum code length for direct use (short snippets need LLM enhancement)
 DIRECT_USE_MIN_CHARS = 800
 
+# Known 3blue1brown color naming patterns
+KNOWN_3B1B_COLORS = {
+    # Standard color aliases
+    "A_COLOR", "B_COLOR", "C_COLOR", "HYPOTENUSE_COLOR",
+    "SIDE_COLORS", "LINE_COLOR", "AREA_COLOR", "GRAPH_COLOR",
+    "FUNCTION_COLOR", "DERIVATIVE_COLOR", "INTEGRAL_COLOR",
+    "X_COLOR", "Y_COLOR", "Z_COLOR", "T_COLOR",
+    # Common semantic colors
+    "HIGHLIGHT_COLOR", "FOCUS_COLOR", "LABEL_COLOR",
+}
+
+# Manim positioning methods to extract
+POSITIONING_METHODS = {
+    "next_to", "align_to", "move_to", "shift", "to_edge", "to_corner",
+    "center", "arrange", "arrange_in_grid", "set_x", "set_y", "set_z",
+}
+
+# Animation methods to track
+ANIMATION_METHODS = {
+    "play", "wait", "add", "remove", "FadeIn", "FadeOut", "Write",
+    "ShowCreation", "Create", "Transform", "ReplacementTransform",
+    "TransformMatchingTex", "Indicate", "GrowFromCenter", "DrawBorderThenFill",
+    "LaggedStartMap", "Succession", "AnimationGroup",
+}
+
+# Common mobject classes
+MOBJECT_CLASSES = {
+    "Circle", "Square", "Rectangle", "Triangle", "Polygon", "Line", "Arrow",
+    "Dot", "Vector", "Axes", "NumberPlane", "Graph", "ParametricCurve",
+    "Tex", "MathTex", "Text", "TexText", "VGroup", "Group", "VMobject",
+    "Surface", "ThreeDAxes", "ValueTracker", "DecimalNumber",
+}
+
 
 class CodeGeneratorAgent(BaseAgent):
     """Generates Manim code from scene plans, using RAG for few-shot examples."""
 
     name = "code_generator"
+    _api_graph: "ManimAPIGraph | None" = None
+
+    async def _get_api_graph(self) -> "ManimAPIGraph | None":
+        """Get or initialize the API relationship graph.
+
+        Returns:
+            ManimAPIGraph instance or None if unavailable
+        """
+        if self._api_graph is not None:
+            return self._api_graph
+
+        try:
+            from manim_mcp.core.api_graph import get_api_graph
+            self._api_graph = await get_api_graph(self.rag if self.rag_available else None)
+            if self._api_graph and self._api_graph.available:
+                stats = self._api_graph.get_graph_stats()
+                logger.info(
+                    "[API-GRAPH] Initialized with %d nodes, %d edges",
+                    stats.get("nodes", 0),
+                    stats.get("edges", 0),
+                )
+            return self._api_graph
+        except ImportError:
+            logger.debug("[API-GRAPH] networkx not installed - graph unavailable")
+            return None
+        except Exception as e:
+            logger.warning("[API-GRAPH] Failed to initialize: %s", e)
+            return None
+
+    async def _get_method_sequence_suggestions(
+        self,
+        analysis: ConceptAnalysis,
+        plan: ScenePlan,
+    ) -> list[dict]:
+        """Get method sequence suggestions from the API graph.
+
+        Args:
+            analysis: Concept analysis with visual elements
+            plan: Scene plan with segments
+
+        Returns:
+            List of suggested method sequences
+        """
+        api_graph = await self._get_api_graph()
+        if not api_graph or not api_graph.available:
+            return []
+
+        suggestions = []
+
+        # Get mobjects from analysis
+        visual_elements = analysis.visual_elements or []
+
+        # For each visual element, suggest animation sequences
+        for element in visual_elements[:5]:  # Limit to first 5 elements
+            # Normalize element name to match graph nodes
+            element_normalized = element.strip().replace(" ", "")
+
+            # Check if element exists as a node
+            node_info = api_graph.get_method_info(element_normalized)
+            if not node_info:
+                # Try common variations
+                for variant in [element_normalized, element_normalized.title(), element_normalized.upper()]:
+                    node_info = api_graph.get_method_info(variant)
+                    if node_info:
+                        element_normalized = variant
+                        break
+
+            if node_info:
+                # Get what commonly follows this mobject/method
+                next_methods = api_graph.get_valid_next_methods(
+                    element_normalized,
+                    limit=5,
+                )
+                if next_methods:
+                    suggestions.append({
+                        "element": element_normalized,
+                        "category": node_info.category,
+                        "next_methods": [
+                            {"name": m[0], "weight": m[1], "relation": m[2]}
+                            for m in next_methods
+                        ],
+                    })
+
+                # Get commonly paired methods
+                paired = api_graph.get_commonly_paired(element_normalized, limit=3)
+                if paired:
+                    suggestions.append({
+                        "element": element_normalized,
+                        "paired_with": [{"name": p[0], "weight": p[1]} for p in paired],
+                    })
+
+        # For each segment, suggest animation chains
+        for seg in plan.segments[:3]:  # First 3 segments
+            if seg.animations:
+                for anim in seg.animations[:2]:
+                    anim_normalized = anim.strip().replace(" ", "")
+                    next_methods = api_graph.get_valid_next_methods(anim_normalized, limit=3)
+                    if next_methods:
+                        suggestions.append({
+                            "segment": seg.name,
+                            "animation": anim_normalized,
+                            "can_follow_with": [m[0] for m in next_methods],
+                        })
+
+        if suggestions:
+            logger.info("[API-GRAPH] Generated %d method sequence suggestions", len(suggestions))
+
+        return suggestions
+
+    def _extract_patterns_from_examples(self, examples: list[dict]) -> dict:
+        """Extract reusable patterns from RAG examples, not just raw code.
+
+        Uses AST parsing to extract:
+        1. Color naming patterns - How colors are aliased (e.g., A_COLOR = BLUE_A)
+        2. Object creation patterns - Common mobject creation idioms
+        3. Animation sequences - Typical animation chains
+        4. Positioning patterns - Layout conventions (next_to, align_to, etc.)
+        5. Anti-patterns - Things to avoid (from error examples)
+
+        Args:
+            examples: List of RAG example dicts with 'content' field containing code
+
+        Returns:
+            Dict with extracted patterns organized by category
+        """
+        patterns = {
+            "color_naming": [],
+            "object_creation": [],
+            "animation_sequences": [],
+            "positioning": [],
+            "anti_patterns": [],
+        }
+
+        for example in examples:
+            content = example.get("content", "")
+            metadata = example.get("metadata", {})
+            is_error = metadata.get("category") == "error" or "ERROR:" in content
+
+            if is_error:
+                # Extract anti-patterns from error examples
+                anti_patterns = self._extract_anti_patterns(content)
+                patterns["anti_patterns"].extend(anti_patterns)
+            else:
+                # Parse code and extract patterns
+                try:
+                    tree = ast.parse(content)
+                    patterns["color_naming"].extend(
+                        self._extract_color_patterns(tree, content)
+                    )
+                    patterns["object_creation"].extend(
+                        self._extract_object_creation_patterns(tree, content)
+                    )
+                    patterns["animation_sequences"].extend(
+                        self._extract_animation_sequences(tree, content)
+                    )
+                    patterns["positioning"].extend(
+                        self._extract_positioning_patterns(tree, content)
+                    )
+                except SyntaxError as e:
+                    logger.debug("[PATTERN] Failed to parse example: %s", e)
+                    # Try regex-based extraction as fallback
+                    patterns["color_naming"].extend(
+                        self._extract_color_patterns_regex(content)
+                    )
+                    patterns["positioning"].extend(
+                        self._extract_positioning_patterns_regex(content)
+                    )
+
+        # Deduplicate and limit each category
+        for key in patterns:
+            # Remove duplicates while preserving order
+            seen = set()
+            unique = []
+            for item in patterns[key]:
+                item_str = str(item)
+                if item_str not in seen:
+                    seen.add(item_str)
+                    unique.append(item)
+            patterns[key] = unique[:10]  # Limit to 10 per category
+
+        # Log extraction stats
+        total = sum(len(v) for v in patterns.values())
+        logger.info(
+            "[PATTERN] Extracted %d patterns: colors=%d, objects=%d, animations=%d, positioning=%d, anti=%d",
+            total,
+            len(patterns["color_naming"]),
+            len(patterns["object_creation"]),
+            len(patterns["animation_sequences"]),
+            len(patterns["positioning"]),
+            len(patterns["anti_patterns"]),
+        )
+
+        return patterns
+
+    def _extract_color_patterns(self, tree: ast.AST, code: str) -> list[dict]:
+        """Extract color naming conventions from AST.
+
+        Looks for patterns like:
+        - A_COLOR = BLUE_A
+        - SIDE_COLORS = [RED, GREEN, BLUE]
+        - color=BLUE, fill_color=GREEN
+        """
+        color_patterns = []
+
+        for node in ast.walk(tree):
+            # Assignment: COLOR_NAME = COLOR_VALUE
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        name = target.id
+                        # Check if it looks like a color constant
+                        if name.upper() == name and ("COLOR" in name or name in KNOWN_3B1B_COLORS):
+                            # Get the source for the value
+                            try:
+                                value_src = ast.get_source_segment(code, node.value)
+                                if value_src:
+                                    color_patterns.append({
+                                        "type": "alias",
+                                        "name": name,
+                                        "value": value_src,
+                                        "example": f"{name} = {value_src}",
+                                    })
+                            except Exception:
+                                pass
+
+            # Keyword arguments: color=BLUE, fill_color=RED
+            if isinstance(node, ast.keyword):
+                if node.arg and "color" in node.arg.lower():
+                    try:
+                        value_src = ast.get_source_segment(code, node.value)
+                        if value_src and len(value_src) < 50:  # Skip complex expressions
+                            color_patterns.append({
+                                "type": "usage",
+                                "param": node.arg,
+                                "value": value_src,
+                                "example": f"{node.arg}={value_src}",
+                            })
+                    except Exception:
+                        pass
+
+        return color_patterns
+
+    def _extract_color_patterns_regex(self, code: str) -> list[dict]:
+        """Fallback regex-based color pattern extraction."""
+        color_patterns = []
+
+        # Match: COLOR_NAME = COLOR_VALUE
+        color_assign_re = re.compile(
+            r'^([A-Z_]+COLOR[A-Z_]*)\s*=\s*([A-Z_]+(?:\s*\[.*?\])?)',
+            re.MULTILINE
+        )
+        for match in color_assign_re.finditer(code):
+            color_patterns.append({
+                "type": "alias",
+                "name": match.group(1),
+                "value": match.group(2),
+                "example": match.group(0).strip(),
+            })
+
+        # Match known 3b1b color names
+        for color_name in KNOWN_3B1B_COLORS:
+            if color_name in code:
+                # Find the assignment
+                pattern = re.compile(rf'{color_name}\s*=\s*([A-Z_\[\],\s]+)')
+                match = pattern.search(code)
+                if match:
+                    color_patterns.append({
+                        "type": "alias",
+                        "name": color_name,
+                        "value": match.group(1).strip(),
+                        "example": f"{color_name} = {match.group(1).strip()}",
+                    })
+
+        return color_patterns
+
+    def _extract_object_creation_patterns(self, tree: ast.AST, code: str) -> list[dict]:
+        """Extract common mobject creation idioms.
+
+        Looks for patterns like:
+        - axes = Axes(x_range=[...], y_range=[...])
+        - graph = axes.get_graph(lambda x: ...)
+        - label = Tex(r"...").next_to(...)
+        """
+        creation_patterns = []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name):
+                    var_name = target.id
+                    value = node.value
+
+                    # Direct class instantiation
+                    if isinstance(value, ast.Call):
+                        func_name = self._get_call_name(value)
+                        if func_name and func_name in MOBJECT_CLASSES:
+                            try:
+                                call_src = ast.get_source_segment(code, value)
+                                if call_src and len(call_src) < 200:
+                                    creation_patterns.append({
+                                        "type": "instantiation",
+                                        "class": func_name,
+                                        "variable": var_name,
+                                        "example": f"{var_name} = {call_src}",
+                                    })
+                            except Exception:
+                                pass
+
+                    # Method chain (e.g., obj.get_graph().set_color(...))
+                    if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+                        method_name = value.func.attr
+                        if method_name.startswith("get_"):
+                            try:
+                                call_src = ast.get_source_segment(code, value)
+                                if call_src and len(call_src) < 200:
+                                    creation_patterns.append({
+                                        "type": "factory_method",
+                                        "method": method_name,
+                                        "variable": var_name,
+                                        "example": f"{var_name} = {call_src}",
+                                    })
+                            except Exception:
+                                pass
+
+        return creation_patterns
+
+    def _extract_animation_sequences(self, tree: ast.AST, code: str) -> list[dict]:
+        """Extract typical animation chains.
+
+        Looks for patterns like:
+        - self.play(Write(title), run_time=2)
+        - self.play(Transform(a, b))
+        - self.wait(1)
+        - Sequences of self.play() calls
+        """
+        animation_sequences = []
+        play_calls = []
+
+        for node in ast.walk(tree):
+            # Find self.play() and self.wait() calls
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute):
+                    if (isinstance(node.func.value, ast.Name) and
+                        node.func.value.id == "self"):
+                        method = node.func.attr
+                        if method in ("play", "wait", "add", "remove"):
+                            try:
+                                call_src = ast.get_source_segment(code, node)
+                                if call_src and len(call_src) < 150:
+                                    play_calls.append({
+                                        "method": method,
+                                        "line": getattr(node, 'lineno', 0),
+                                        "example": call_src,
+                                    })
+                            except Exception:
+                                pass
+
+        # Group consecutive plays into sequences
+        if play_calls:
+            # Sort by line number
+            play_calls.sort(key=lambda x: x["line"])
+
+            current_seq = []
+            for call in play_calls:
+                if not current_seq:
+                    current_seq.append(call)
+                elif call["line"] - current_seq[-1]["line"] <= 3:
+                    # Within 3 lines, part of same sequence
+                    current_seq.append(call)
+                else:
+                    # Start new sequence
+                    if len(current_seq) >= 2:
+                        animation_sequences.append({
+                            "type": "sequence",
+                            "length": len(current_seq),
+                            "methods": [c["method"] for c in current_seq],
+                            "examples": [c["example"] for c in current_seq[:3]],
+                        })
+                    current_seq = [call]
+
+            # Don't forget last sequence
+            if len(current_seq) >= 2:
+                animation_sequences.append({
+                    "type": "sequence",
+                    "length": len(current_seq),
+                    "methods": [c["method"] for c in current_seq],
+                    "examples": [c["example"] for c in current_seq[:3]],
+                })
+
+        return animation_sequences
+
+    def _extract_positioning_patterns(self, tree: ast.AST, code: str) -> list[dict]:
+        """Extract layout conventions.
+
+        Looks for patterns like:
+        - .next_to(obj, DOWN, buff=0.5)
+        - .align_to(obj, LEFT)
+        - .to_corner(UL)
+        - VGroup(...).arrange(DOWN, buff=0.3)
+        """
+        positioning_patterns = []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute):
+                    method = node.func.attr
+                    if method in POSITIONING_METHODS:
+                        try:
+                            call_src = ast.get_source_segment(code, node)
+                            # Extract just the method call part
+                            if call_src:
+                                # Find the .method_name(...) part
+                                method_match = re.search(
+                                    rf'\.{method}\([^)]*\)',
+                                    call_src
+                                )
+                                if method_match and len(method_match.group(0)) < 100:
+                                    positioning_patterns.append({
+                                        "type": "method",
+                                        "method": method,
+                                        "example": method_match.group(0),
+                                    })
+                        except Exception:
+                            pass
+
+        return positioning_patterns
+
+    def _extract_positioning_patterns_regex(self, code: str) -> list[dict]:
+        """Fallback regex-based positioning pattern extraction."""
+        positioning_patterns = []
+
+        for method in POSITIONING_METHODS:
+            pattern = re.compile(rf'\.{method}\([^)]*\)')
+            for match in pattern.finditer(code):
+                if len(match.group(0)) < 100:
+                    positioning_patterns.append({
+                        "type": "method",
+                        "method": method,
+                        "example": match.group(0),
+                    })
+
+        return positioning_patterns
+
+    def _extract_anti_patterns(self, content: str) -> list[dict]:
+        """Extract anti-patterns from error examples.
+
+        Parses error documents with ERROR:/FIX: format.
+        """
+        anti_patterns = []
+
+        # Parse ERROR:/FIX: format
+        if "ERROR:" in content and "FIX:" in content:
+            parts = content.split("FIX:")
+            error_part = parts[0].replace("ERROR:", "").strip()
+            fix_part = parts[-1].strip() if len(parts) > 1 else ""
+
+            # Try to extract the specific wrong code
+            wrong_code_match = re.search(r'```python?\n?(.*?)```', error_part, re.DOTALL)
+            right_code_match = re.search(r'```python?\n?(.*?)```', fix_part, re.DOTALL)
+
+            anti_patterns.append({
+                "type": "error_fix",
+                "error": error_part[:200] if len(error_part) > 200 else error_part,
+                "fix": fix_part[:200] if len(fix_part) > 200 else fix_part,
+                "wrong_code": wrong_code_match.group(1).strip() if wrong_code_match else None,
+                "right_code": right_code_match.group(1).strip() if right_code_match else None,
+            })
+
+        # Also look for common mistake patterns
+        mistake_patterns = [
+            (r'tips\s*=\s*True', "Axes does not have tips parameter"),
+            (r'x_length\s*=', "Axes uses width/height, not x_length/y_length"),
+            (r'MathTex\s*\(', "Use Tex() not MathTex() in manimgl"),
+            (r'Create\s*\(', "Use ShowCreation() not Create() in manimgl"),
+            (r'\.plot\s*\(', "Use .get_graph() not .plot() in manimgl"),
+        ]
+
+        for pattern, description in mistake_patterns:
+            if re.search(pattern, content):
+                anti_patterns.append({
+                    "type": "common_mistake",
+                    "pattern": pattern,
+                    "description": description,
+                })
+
+        return anti_patterns
+
+    def _get_call_name(self, node: ast.Call) -> str | None:
+        """Get the name of a function/class being called."""
+        if isinstance(node.func, ast.Name):
+            return node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            return node.func.attr
+        return None
+
+    def _format_patterns_for_prompt(self, patterns: dict) -> str:
+        """Format extracted patterns for inclusion in the prompt."""
+        parts = []
+
+        # Color naming conventions
+        if patterns["color_naming"]:
+            parts.append("COLOR NAMING CONVENTIONS (from 3blue1brown):")
+            aliases = [p for p in patterns["color_naming"] if p.get("type") == "alias"]
+            usages = [p for p in patterns["color_naming"] if p.get("type") == "usage"]
+
+            if aliases:
+                parts.append("  Semantic color aliases:")
+                for p in aliases[:5]:
+                    parts.append(f"    {p['example']}")
+
+            if usages:
+                parts.append("  Common color parameters:")
+                unique_params = set()
+                for p in usages[:5]:
+                    param_val = f"{p['param']}={p['value']}"
+                    if param_val not in unique_params:
+                        unique_params.add(param_val)
+                        parts.append(f"    {p['example']}")
+            parts.append("")
+
+        # Object creation patterns
+        if patterns["object_creation"]:
+            parts.append("OBJECT CREATION PATTERNS:")
+            instantiations = [p for p in patterns["object_creation"] if p.get("type") == "instantiation"]
+            factories = [p for p in patterns["object_creation"] if p.get("type") == "factory_method"]
+
+            if instantiations:
+                parts.append("  Direct instantiation:")
+                for p in instantiations[:4]:
+                    parts.append(f"    {p['example']}")
+
+            if factories:
+                parts.append("  Factory methods:")
+                for p in factories[:4]:
+                    parts.append(f"    {p['example']}")
+            parts.append("")
+
+        # Animation sequences
+        if patterns["animation_sequences"]:
+            parts.append("ANIMATION SEQUENCE PATTERNS:")
+            for seq in patterns["animation_sequences"][:3]:
+                methods_str = " -> ".join(seq["methods"][:5])
+                parts.append(f"  Pattern: {methods_str}")
+                for ex in seq["examples"][:2]:
+                    parts.append(f"    {ex}")
+            parts.append("")
+
+        # Positioning patterns
+        if patterns["positioning"]:
+            parts.append("POSITIONING PATTERNS:")
+            # Group by method
+            by_method = {}
+            for p in patterns["positioning"]:
+                method = p.get("method", "other")
+                if method not in by_method:
+                    by_method[method] = []
+                by_method[method].append(p["example"])
+
+            for method, examples in list(by_method.items())[:5]:
+                unique_examples = list(set(examples))[:2]
+                parts.append(f"  {method}:")
+                for ex in unique_examples:
+                    parts.append(f"    {ex}")
+            parts.append("")
+
+        # Anti-patterns
+        if patterns["anti_patterns"]:
+            parts.append("ANTI-PATTERNS TO AVOID:")
+            for anti in patterns["anti_patterns"][:5]:
+                if anti.get("type") == "error_fix":
+                    parts.append(f"  DON'T: {anti['error'][:100]}")
+                    if anti.get("wrong_code"):
+                        parts.append(f"    Wrong: {anti['wrong_code'][:80]}")
+                    if anti.get("fix"):
+                        parts.append(f"  DO: {anti['fix'][:100]}")
+                    if anti.get("right_code"):
+                        parts.append(f"    Right: {anti['right_code'][:80]}")
+                elif anti.get("type") == "common_mistake":
+                    parts.append(f"  AVOID: {anti['description']}")
+            parts.append("")
+
+        return "\n".join(parts)
 
     async def process(
         self,
@@ -46,23 +723,102 @@ class CodeGeneratorAgent(BaseAgent):
         if narration_script:
             logger.info("Code will follow %d-sentence narration script", len(narration_script))
 
-        # Get RAG examples for few-shot context
+        # Get RAG examples for few-shot context - TIERED PARALLEL APPROACH
+        # Tier 1: Critical (API sigs + scenes + graph) - always run in parallel
+        # Tier 2: Supplementary (patterns + errors) - only if tier 1 insufficient
         rag_context = ""
         high_quality_template = None
         error_patterns = []
         animation_patterns = []
         api_signatures = []
+        method_sequences = []
+
         if self.rag_available and plan.rag_examples:
-            rag_context, high_quality_template = await self._get_rag_examples(prompt, analysis)
-            # Get error patterns to avoid common mistakes
-            error_patterns = await self._get_error_patterns(prompt, analysis)
-            # Get animation patterns for high-quality 3b1b-style animations
-            animation_patterns = await self._get_animation_patterns(prompt, analysis)
-            # Get API signatures for correct parameter usage
-            api_signatures = await self._get_api_signatures(prompt, analysis)
+            logger.info("[RAG] Querying sources for code generation (tiered parallel)")
+
+            # TIER 1: Critical queries in parallel
+            # - RAG examples (similar scenes for few-shot)
+            # - API signatures (parameter correctness)
+            # - Method sequences (in-memory graph, very fast)
+            tier1_results = await asyncio.gather(
+                self._get_rag_examples(prompt, analysis),
+                self._get_api_signatures(prompt, analysis),
+                self._get_method_sequence_suggestions(analysis, plan),
+                return_exceptions=True,
+            )
+
+            rag_result, api_result, sequences_result = tier1_results
+
+            if isinstance(rag_result, tuple):
+                rag_context, high_quality_template = rag_result
+            elif isinstance(rag_result, Exception):
+                logger.warning("[RAG] Error fetching examples: %s", rag_result)
+
+            if isinstance(api_result, list):
+                api_signatures = api_result
+            elif isinstance(api_result, Exception):
+                logger.warning("[RAG] Error fetching API signatures: %s", api_result)
+
+            if isinstance(sequences_result, list):
+                method_sequences = sequences_result
+            elif isinstance(sequences_result, Exception):
+                logger.warning("[API-GRAPH] Error fetching method sequences: %s", sequences_result)
+
+            # TIER 2: Supplementary queries (parallel, but conditional)
+            # Only fetch if we need more context
+            need_patterns = not high_quality_template or len(rag_context) < 500
+            need_errors = bool(api_signatures)  # Errors relate to API misuse
+
+            if need_patterns or need_errors:
+                tier2_tasks = []
+                if need_patterns:
+                    tier2_tasks.append(self._get_animation_patterns(prompt, analysis))
+                else:
+                    tier2_tasks.append(asyncio.sleep(0))  # Placeholder
+
+                if need_errors:
+                    tier2_tasks.append(self._get_error_patterns(prompt, analysis))
+                else:
+                    tier2_tasks.append(asyncio.sleep(0))  # Placeholder
+
+                tier2_results = await asyncio.gather(*tier2_tasks, return_exceptions=True)
+
+                if need_patterns and isinstance(tier2_results[0], list):
+                    animation_patterns = tier2_results[0]
+                elif need_patterns and isinstance(tier2_results[0], Exception):
+                    logger.debug("[RAG] Patterns query failed: %s", tier2_results[0])
+
+                if need_errors and isinstance(tier2_results[1], list):
+                    error_patterns = tier2_results[1]
+                elif need_errors and isinstance(tier2_results[1], Exception):
+                    logger.debug("[RAG] Errors query failed: %s", tier2_results[1])
+        else:
+            # Still get method sequences from API graph (doesn't need RAG)
+            method_sequences = await self._get_method_sequence_suggestions(analysis, plan)
 
         # Store template code for reference
         template_code = high_quality_template.get("content") if high_quality_template else None
+
+        # Extract patterns from RAG examples using AST parsing
+        # This gives us structured patterns instead of raw code dumps
+        extracted_patterns = {}
+        if rag_context or error_patterns or animation_patterns:
+            # Collect all examples for pattern extraction
+            all_examples = []
+            if high_quality_template:
+                all_examples.append(high_quality_template)
+            # Add animation patterns (they have code content)
+            for pattern in animation_patterns:
+                all_examples.append(pattern)
+            # Add error patterns as anti-pattern sources
+            for err in error_patterns:
+                all_examples.append({
+                    "content": err.get("content", ""),
+                    "metadata": {"category": "error"},
+                })
+            # Extract patterns from collected examples
+            if all_examples:
+                extracted_patterns = self._extract_patterns_from_examples(all_examples)
 
         # For VERY HIGH quality matches, use 3b1b code DIRECTLY (no conversion!)
         # manimgl will run it natively
@@ -83,8 +839,12 @@ class CodeGeneratorAgent(BaseAgent):
                     template_len, DIRECT_USE_MIN_CHARS
                 )
 
-        # Build generation prompt
-        gen_prompt = self._build_prompt(prompt, analysis, plan, rag_context, high_quality_template, error_patterns, animation_patterns, api_signatures, narration_script)
+        # Build generation prompt with extracted patterns
+        gen_prompt = self._build_prompt(
+            prompt, analysis, plan, rag_context, high_quality_template,
+            error_patterns, animation_patterns, api_signatures, narration_script,
+            method_sequences, extracted_patterns
+        )
 
         # Generate code
         system = get_code_generator_system(self.config.latex_available)
@@ -287,7 +1047,7 @@ class CodeGeneratorAgent(BaseAgent):
         # Add domain-specific keywords
         prompt_lower = prompt.lower()
         if any(kw in prompt_lower for kw in ["riemann", "rectangles", "integral", "area under"]):
-            query_parts.append("riemann_sum_convergence progression")
+            query_parts.append("riemann rectangles area integral approximation")
         if any(kw in prompt_lower for kw in ["derivative", "tangent", "slope", "secant"]):
             query_parts.append("derivative_definition secant tangent_line limit calculus")
         if any(kw in prompt_lower for kw in ["series", "sum", "convergence"]):
@@ -334,6 +1094,114 @@ class CodeGeneratorAgent(BaseAgent):
 
         return results[:4]  # Return up to 4 patterns
 
+    def _extract_method_names_from_prompt(
+        self,
+        prompt: str,
+        analysis: ConceptAnalysis,
+    ) -> list[str]:
+        """Extract likely Manim method/class names from the user prompt.
+
+        Uses keyword mapping and visual elements to identify specific API methods
+        that should be looked up BEFORE code generation.
+
+        Returns:
+            List of specific method/class names to look up (e.g., ["Axes", "get_graph", "Transform"])
+        """
+        extracted = set()
+        prompt_lower = prompt.lower()
+
+        # 1. Map user keywords to manimgl API names
+        for keyword, api_names in MANIM_KEYWORD_MAP.items():
+            if keyword in prompt_lower:
+                extracted.update(api_names)
+                logger.debug("[API-LOOKUP] Keyword '%s' -> %s", keyword, api_names)
+
+        # 2. Add visual elements from analysis (these are often actual class names)
+        for elem in (analysis.visual_elements or []):
+            # Clean and capitalize to match class names
+            elem_clean = elem.strip()
+            if elem_clean:
+                extracted.add(elem_clean)
+                # Also check if it maps to other methods
+                elem_lower = elem_clean.lower()
+                if elem_lower in MANIM_KEYWORD_MAP:
+                    extracted.update(MANIM_KEYWORD_MAP[elem_lower])
+
+        # 3. Extract CamelCase words that might be class names
+        camel_case_pattern = re.compile(r'\b([A-Z][a-zA-Z]+)\b')
+        for match in camel_case_pattern.findall(prompt):
+            extracted.add(match)
+
+        # 4. Extract method-like names (e.g., get_graph, add_coordinate_labels)
+        method_pattern = re.compile(r'\b(get_\w+|add_\w+|set_\w+|animate\.\w+)\b')
+        for match in method_pattern.findall(prompt):
+            extracted.add(match)
+
+        # 5. Add core classes that are almost always needed
+        core_classes = {"Scene", "VGroup", "self.play", "self.wait"}
+        extracted.update(core_classes)
+
+        result = list(extracted)
+        logger.info("[API-LOOKUP] Extracted %d method/class names from prompt: %s",
+                   len(result), result[:10])  # Log first 10
+        return result
+
+    async def _get_api_signatures_for_methods(
+        self,
+        method_names: list[str],
+    ) -> list[dict]:
+        """Look up specific API signatures by method/class name.
+
+        This is the PRE-GENERATION lookup that fetches exact signatures
+        for methods we expect the LLM to use.
+
+        Returns:
+            List of API signatures with exact parameters
+        """
+        if not self.rag_available or not method_names:
+            return []
+
+        signatures = []
+        seen_ids = set()
+
+        # First, try to get exact matches by name
+        for name in method_names[:15]:  # Limit to avoid too many lookups
+            # Try common class prefixes for method names
+            prefixes_to_try = ["", "Axes.", "Scene.", "VMobject.", "Mobject.", "Animation."]
+
+            for prefix in prefixes_to_try:
+                full_name = f"{prefix}{name}" if prefix else name
+                try:
+                    result = await self.rag.get_api_signature(full_name)
+                    if result and result.get("document_id") not in seen_ids:
+                        seen_ids.add(result["document_id"])
+                        signatures.append(result)
+                        logger.debug("[API-LOOKUP] Found exact signature: %s", full_name)
+                        break  # Found it, don't try other prefixes
+                except Exception:
+                    pass
+
+        # Then, do a semantic search for methods we couldn't find exactly
+        if len(signatures) < 8:  # Want at least 8 signatures
+            remaining_slots = 8 - len(signatures)
+            search_query = " ".join(method_names[:10])
+            try:
+                search_results = await self.rag.search_api_signatures(
+                    search_query, n_results=remaining_slots + 3
+                )
+                for result in search_results:
+                    if result.get("document_id") not in seen_ids:
+                        seen_ids.add(result["document_id"])
+                        signatures.append(result)
+                        if len(signatures) >= 12:  # Cap at 12 total
+                            break
+            except Exception as e:
+                logger.warning("[API-LOOKUP] Search failed: %s", e)
+
+        logger.info("[API-LOOKUP] Retrieved %d API signatures for pre-generation constraints",
+                   len(signatures))
+        return signatures
+
     async def _get_api_signatures(
         self,
         prompt: str,
@@ -341,49 +1209,19 @@ class CodeGeneratorAgent(BaseAgent):
     ) -> list[dict]:
         """Retrieve relevant API signatures for correct parameter usage.
 
+        This is a convenience method that combines extraction and lookup.
+
         Returns:
             List of API signatures with parameters and docstrings
         """
         if not self.rag_available:
             return []
 
-        # Build query from visual elements and prompt
-        visual_elements = analysis.visual_elements or []
-        query_parts = []
+        # Extract method names from the prompt
+        method_names = self._extract_method_names_from_prompt(prompt, analysis)
 
-        # Add common manimgl classes/methods from visual elements
-        for elem in visual_elements:
-            query_parts.append(elem)
-
-        # Add keywords from prompt
-        prompt_lower = prompt.lower()
-        method_keywords = [
-            "axes", "graph", "riemann", "rectangles", "area", "tangent",
-            "transform", "animation", "mobject", "vgroup", "tex", "mathtex",
-            "circle", "square", "line", "arrow", "dot", "polygon",
-            "numberplane", "complexplane", "valuetarcker", "always_redraw"
-        ]
-        for kw in method_keywords:
-            if kw in prompt_lower:
-                query_parts.append(kw)
-
-        if not query_parts:
-            query_parts = ["Axes", "Scene", "animation"]
-
-        search_query = " ".join(query_parts[:5])  # Limit query length
-        logger.debug("[RAG] Searching API signatures for: %s", search_query[:100])
-
-        try:
-            results = await self.rag.search_api_signatures(search_query, n_results=5)
-
-            if results:
-                logger.info("[RAG] Found %d API signatures for correct parameter usage", len(results))
-
-            return results
-
-        except Exception as e:
-            logger.warning("[RAG] API signature search failed: %s", e)
-            return []
+        # Look up signatures for those specific methods
+        return await self._get_api_signatures_for_methods(method_names)
 
     def _build_prompt(
         self,
@@ -396,8 +1234,10 @@ class CodeGeneratorAgent(BaseAgent):
         animation_patterns: list[dict] | None = None,
         api_signatures: list[dict] | None = None,
         narration_script: list[str] | None = None,
+        method_sequences: list[dict] | None = None,
+        extracted_patterns: dict | None = None,
     ) -> str:
-        """Build the code generation prompt with all context."""
+        """Build the code generation prompt with all context and extracted patterns."""
         parts = [
             f"Create a Manim animation: {prompt}",
             "",
@@ -483,6 +1323,23 @@ class CodeGeneratorAgent(BaseAgent):
                 "Reference examples (study their style and patterns):",
                 rag_context,
             ])
+
+        # Add extracted patterns from RAG examples (structured, not raw code)
+        # These provide reusable idioms instead of raw code dumps
+        if extracted_patterns and any(extracted_patterns.values()):
+            formatted_patterns = self._format_patterns_for_prompt(extracted_patterns)
+            if formatted_patterns.strip():
+                parts.extend([
+                    "",
+                    "=" * 60,
+                    "EXTRACTED PATTERNS FROM 3BLUE1BROWN CODE",
+                    "=" * 60,
+                    "",
+                    "The following patterns were extracted from verified 3b1b code.",
+                    "Use these idioms for consistent, high-quality animations:",
+                    "",
+                    formatted_patterns,
+                ])
 
         # Add error patterns to avoid
         if error_patterns:
@@ -616,30 +1473,116 @@ class CodeGeneratorAgent(BaseAgent):
                 "=" * 60,
             ])
 
-        # Add API signatures for correct parameter usage
+        # Add API signatures as STRICT CONSTRAINTS for correct parameter usage
         if api_signatures:
             parts.extend([
                 "",
                 "=" * 60,
-                "MANIMGL API SIGNATURES (use these EXACT parameters!):",
+                "API CONSTRAINTS - MANDATORY METHOD SIGNATURES",
                 "=" * 60,
                 "",
+                "CRITICAL: You MUST use ONLY these exact method signatures.",
+                "DO NOT invent parameters. DO NOT guess parameter names.",
+                "If a parameter is not listed below, it DOES NOT EXIST.",
+                "",
             ])
-            for sig in api_signatures[:8]:  # Limit to 8 signatures
+
+            # Format each signature as a strict constraint
+            for i, sig in enumerate(api_signatures[:12], 1):  # Up to 12 signatures
                 content = sig.get("content", "")
                 meta = sig.get("metadata", {})
                 method_name = meta.get("name", "")
                 class_name = meta.get("class_name", "")
+                parameters = meta.get("parameters", "")
 
+                # Build the header
                 if class_name and method_name:
-                    parts.append(f"### {class_name}.{method_name}")
+                    header = f"{class_name}.{method_name}"
                 elif method_name:
-                    parts.append(f"### {method_name}")
+                    header = method_name
+                else:
+                    header = f"Method {i}"
 
-                # Extract signature and key params
-                if len(content) > 500:
-                    content = content[:500] + "..."
+                parts.append(f"### {i}. {header}")
+
+                # Extract and format the signature line if available
+                if parameters:
+                    parts.append(f"**Signature:** `{header}({parameters})`")
+                    parts.append("")
+
+                # Format the full content with parameter details
+                # Truncate long content but preserve signature info
+                if len(content) > 600:
+                    # Try to preserve the signature and first few params
+                    lines = content.split('\n')
+                    kept_lines = []
+                    char_count = 0
+                    for line in lines:
+                        if char_count + len(line) > 600:
+                            kept_lines.append("# ... (see full docs for more parameters)")
+                            break
+                        kept_lines.append(line)
+                        char_count += len(line)
+                    content = '\n'.join(kept_lines)
+
                 parts.append(f"```python\n{content}\n```")
                 parts.append("")
+
+            # Add strong closing reminder
+            parts.extend([
+                "=" * 60,
+                "REMEMBER: Use ONLY the parameters shown above.",
+                "Common mistakes to AVOID:",
+                "- tips=True on Axes (WRONG - no such parameter)",
+                "- x_length/y_length on Axes (WRONG - use width/height)",
+                "- MathTex (WRONG - use Tex in manimgl)",
+                "- Create (WRONG - use ShowCreation in manimgl)",
+                "- axes.plot() (WRONG - use axes.get_graph())",
+                "=" * 60,
+            ])
+
+        # Add method sequence suggestions from API graph
+        if method_sequences:
+            parts.extend([
+                "",
+                "=" * 60,
+                "RECOMMENDED METHOD SEQUENCES (from 3b1b analysis)",
+                "=" * 60,
+                "",
+                "These are common method chains observed in 3blue1brown code.",
+                "Use these patterns for idiomatic animations:",
+                "",
+            ])
+
+            for suggestion in method_sequences[:8]:  # Limit to 8 suggestions
+                element = suggestion.get("element", "")
+                segment = suggestion.get("segment", "")
+
+                if "next_methods" in suggestion:
+                    # Element -> next methods
+                    next_methods = suggestion["next_methods"]
+                    methods_str = ", ".join(
+                        f"{m['name']} ({m['weight']:.1%})"
+                        for m in next_methods[:3]
+                    )
+                    parts.append(f"- After {element}: typically use {methods_str}")
+
+                elif "paired_with" in suggestion:
+                    # Element commonly paired with
+                    paired = suggestion["paired_with"]
+                    paired_str = ", ".join(p["name"] for p in paired)
+                    parts.append(f"- {element} often used with: {paired_str}")
+
+                elif "can_follow_with" in suggestion:
+                    # Animation can follow with
+                    anim = suggestion.get("animation", "")
+                    follow = suggestion["can_follow_with"]
+                    parts.append(f"- In '{segment}': after {anim}, consider {', '.join(follow[:3])}")
+
+            parts.extend([
+                "",
+                "These are suggestions - use them when appropriate for smooth transitions.",
+                "",
+            ])
 
         return "\n".join(parts)

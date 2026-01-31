@@ -31,7 +31,7 @@ TOOL_DECLARATIONS = [
                 ),
                 "quality": Schema(
                     type=Type.STRING,
-                    description="Render quality: low, medium, high, production, fourk.",
+                    description="Render quality (default: low). Options: low, medium, high, production, fourk. Only specify if user explicitly requests higher quality.",
                 ),
                 "format": Schema(
                     type=Type.STRING,
@@ -60,7 +60,7 @@ TOOL_DECLARATIONS = [
                 ),
                 "quality": Schema(
                     type=Type.STRING,
-                    description="Render quality: low, medium, high, production, fourk.",
+                    description="Render quality (default: low). Options: low, medium, high, production, fourk. Only specify if user explicitly requests higher quality.",
                 ),
                 "format": Schema(
                     type=Type.STRING,
@@ -177,7 +177,7 @@ async def execute_tool(name: str, args: dict[str, Any], ctx: AppContext) -> dict
 
 
 def _build_render_params(args: dict[str, Any]) -> RenderParams:
-    quality_str = args.get("quality", "medium")
+    quality_str = args.get("quality", "low")
     fmt_str = args.get("format", "mp4")
     return RenderParams(
         quality=RenderQuality(quality_str),

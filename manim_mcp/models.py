@@ -140,7 +140,9 @@ class AnimationResult(BaseModel):
     render_id: str
     status: RenderStatus
     url: Optional[str] = None
+    s3_object_key: Optional[str] = None  # Permanent S3 path for URL regeneration
     thumbnail_url: Optional[str] = None
+    thumbnail_s3_key: Optional[str] = None  # Permanent S3 path for thumbnail
     format: Optional[str] = None
     quality: Optional[str] = None
     file_size_bytes: Optional[int] = None

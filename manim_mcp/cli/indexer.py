@@ -1,4 +1,44 @@
-"""CLI commands for indexing content into ChromaDB."""
+"""CLI commands for indexing content into ChromaDB.
+
+REINDEXING STRATEGY FOR NEW FEATURES
+=====================================
+
+This module implements indexing commands for the RAG system. When new features
+are implemented, the following reindexing may be required:
+
+Phase 1 (Hybrid Search Enhancement):
+------------------------------------
+- API collection needs `method_name` as a top-level metadata field for exact matching
+- Run: `manim-mcp index api` to reindex with enhanced metadata
+- The API signatures are now indexed with additional fields:
+  - method_name: Name of the method (for exact keyword matching)
+  - class_name: Name of the containing class
+  - parameter_names: Comma-separated list of parameter names
+  - module: Full module path (e.g., manimlib.mobject.geometry)
+
+Phase 2 (API Graph for Method Sequences):
+-----------------------------------------
+- New `api-graph` command extracts method call sequences from 3b1b scenes
+- Run: `manim-mcp index api-graph` after indexing 3b1b-videos
+- This creates a graph of API call patterns used together in real scenes
+- Used by the code generator to suggest idiomatic method sequences
+
+Phase 3 (UniXcoder Embeddings):
+-------------------------------
+- When UniXcoder is integrated, ALL collections need reindexing with new embeddings
+- The embedding function change requires clearing and rebuilding each collection
+- Run sequence:
+  1. `manim-mcp index clear all --yes`
+  2. `manim-mcp index 3b1b-videos`
+  3. `manim-mcp index manim-docs`
+  4. `manim-mcp index api`
+  5. `manim-mcp index patterns`
+  6. `manim-mcp index errors`
+  7. `manim-mcp index api-graph`  (if Phase 2 is implemented)
+
+Note: UniXcoder embeddings require the `transformers` package and a GPU for
+reasonable indexing speed. The embedding model will be specified via config.
+"""
 
 from __future__ import annotations
 
@@ -47,6 +87,8 @@ async def cmd_index(
         return await cmd_index_errors(args, ctx, printer)
     elif args.index_command == "patterns":
         return await cmd_index_patterns(args, ctx, printer)
+    elif args.index_command == "api-graph":
+        return await cmd_index_api_graph(args, ctx, printer)
     else:
         printer.error(f"Unknown index command: {args.index_command}")
         return 1
@@ -524,6 +566,10 @@ async def cmd_index_api(
                 # Flatten parameters for metadata (ChromaDB doesn't support nested dicts)
                 param_names = [p.name for p in sig.parameters if p.name not in ("self", "cls")]
                 meta["parameter_names"] = ",".join(param_names)
+
+                # Add method_name as top-level field for exact keyword matching (Phase 1 hybrid search)
+                meta["method_name"] = sig.name
+
                 # Remove nested parameters dict for ChromaDB compatibility
                 if "parameters" in meta:
                     del meta["parameters"]
@@ -539,7 +585,7 @@ async def cmd_index_api(
         for full_name, param_info in known_params.items():
             parts = full_name.split(".")
             class_name = parts[0] if len(parts) > 1 else None
-            method_name = parts[-1]
+            method_name_str = parts[-1]
 
             doc = f"""# {full_name}
 
@@ -554,7 +600,8 @@ These parameters are verified to work with manimgl. Do NOT use the invalid param
 """
             meta = {
                 "id": full_name,
-                "name": method_name,
+                "name": method_name_str,
+                "method_name": method_name_str,  # For exact keyword matching (Phase 1 hybrid search)
                 "class_name": class_name,
                 "valid_params": ",".join(param_info["valid"]),
                 "invalid_params": ",".join(param_info["invalid"]),
@@ -637,3 +684,200 @@ async def cmd_index_patterns(
 
     printer.success(f"Indexed {indexed} animation patterns")
     return 0
+
+
+async def cmd_index_api_graph(
+    args: argparse.Namespace,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Extract method call sequences from indexed 3b1b scenes for API graph.
+
+    This command extracts method call patterns from the scenes collection
+    to build an API usage graph. The graph captures which methods are
+    commonly used together in real 3b1b code.
+
+    Phase 2 Feature: This data supports the API graph for suggesting
+    idiomatic method sequences during code generation.
+
+    Prerequisites:
+    - Scenes must be indexed first: `manim-mcp index 3b1b-videos`
+
+    Output:
+    - Stores method sequence patterns in the API collection with special
+      metadata marking them as "sequence" type entries.
+    """
+    import ast
+    from collections import defaultdict
+    from manim_mcp.cli.output import spinner
+
+    if not ctx.rag.available:
+        printer.error("ChromaDB not available - cannot index")
+        return 1
+
+    # Check if scenes are indexed
+    stats = await ctx.rag.get_collection_stats()
+    if stats["scenes_count"] == 0:
+        printer.error("No scenes indexed. Run 'manim-mcp index 3b1b-videos' first.")
+        return 1
+
+    printer.info(f"Analyzing {stats['scenes_count']} indexed scenes for API call patterns...")
+
+    # Fetch all scenes from the collection
+    # Note: This is a simplified approach - for production, we'd use pagination
+    scenes_collection = ctx.rag._scenes_collection
+    if not scenes_collection:
+        printer.error("Scenes collection not available")
+        return 1
+
+    # Get all scene documents
+    with spinner("Fetching indexed scenes"):
+        all_scenes = scenes_collection.get(include=["documents", "metadatas"])
+
+    if not all_scenes or not all_scenes.get("documents"):
+        printer.error("No scene documents found")
+        return 1
+
+    documents = all_scenes["documents"]
+    metadatas = all_scenes["metadatas"] or [{}] * len(documents)
+
+    printer.info(f"Analyzing {len(documents)} scene chunks for method sequences...")
+
+    # Extract method call sequences from each scene
+    method_sequences: dict[str, list[list[str]]] = defaultdict(list)  # class -> list of method sequences
+    total_sequences = 0
+
+    with spinner("Extracting method call sequences"):
+        for i, (code, meta) in enumerate(zip(documents, metadatas)):
+            try:
+                sequences = _extract_method_sequences(code)
+                for class_name, methods in sequences.items():
+                    if len(methods) >= 2:  # Only store meaningful sequences
+                        method_sequences[class_name].append(methods)
+                        total_sequences += 1
+            except Exception as e:
+                logger.debug("Failed to extract sequences from scene %d: %s", i, e)
+
+    printer.info(f"Found {total_sequences} method sequences across {len(method_sequences)} classes")
+
+    # Index the most common sequences
+    indexed = 0
+    with spinner("Indexing API call patterns"):
+        for class_name, sequences_list in method_sequences.items():
+            # Count sequence frequencies
+            seq_counts: dict[tuple, int] = defaultdict(int)
+            for seq in sequences_list:
+                # Use sliding window for subsequences of length 2-4
+                for window_size in range(2, min(5, len(seq) + 1)):
+                    for start in range(len(seq) - window_size + 1):
+                        subseq = tuple(seq[start:start + window_size])
+                        seq_counts[subseq] += 1
+
+            # Index top sequences (appearing 2+ times)
+            for seq, count in sorted(seq_counts.items(), key=lambda x: -x[1])[:20]:
+                if count < 2:
+                    continue
+
+                methods_str = " -> ".join(seq)
+                example_calls = "\n".join(f"obj.{m}(...)" for m in seq)
+                doc = f"""# API Sequence: {class_name}
+
+## Method Chain
+{methods_str}
+
+## Usage Count
+Found in {count} scenes
+
+## Description
+This method sequence is commonly used in 3b1b animations. When using {class_name},
+these methods are often called in this order.
+
+## Example Pattern
+```python
+obj = {class_name}(...)
+{example_calls}
+```
+"""
+                meta = {
+                    "id": f"seq:{class_name}:{'-'.join(seq)}",
+                    "type": "sequence",
+                    "class_name": class_name,
+                    "methods": ",".join(seq),
+                    "method_count": len(seq),
+                    "usage_count": count,
+                    "is_sequence": True,
+                }
+
+                doc_id = await ctx.rag.index_api_signature(doc, metadata=meta)
+                if doc_id:
+                    indexed += 1
+
+    printer.success(f"Indexed {indexed} API call sequence patterns")
+    return 0
+
+
+def _extract_method_sequences(code: str) -> dict[str, list[str]]:
+    """Extract method call sequences from Python code using AST.
+
+    Returns a dict mapping variable/class names to lists of methods called on them.
+
+    Example:
+        axes = Axes(...)
+        graph = axes.get_graph(...)
+        area = axes.get_area_under_graph(...)
+
+    Would return: {"axes": ["get_graph", "get_area_under_graph"]}
+    """
+    import ast
+    from collections import defaultdict
+
+    sequences: dict[str, list[str]] = defaultdict(list)
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+
+    # Track variable assignments to class types
+    var_types: dict[str, str] = {}
+
+    class SequenceExtractor(ast.NodeVisitor):
+        def visit_Assign(self, node: ast.Assign) -> None:
+            # Track variable = ClassName(...) assignments
+            if (isinstance(node.value, ast.Call) and
+                isinstance(node.value.func, ast.Name)):
+                class_name = node.value.func.id
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        var_types[target.id] = class_name
+
+            # Track variable = obj.method(...) assignments
+            if (isinstance(node.value, ast.Call) and
+                isinstance(node.value.func, ast.Attribute)):
+                if isinstance(node.value.func.value, ast.Name):
+                    var_name = node.value.func.value.id
+                    method_name = node.value.func.attr
+                    # Use the variable's type or the variable name as key
+                    key = var_types.get(var_name, var_name)
+                    sequences[key].append(method_name)
+
+            self.generic_visit(node)
+
+        def visit_Expr(self, node: ast.Expr) -> None:
+            # Track standalone method calls like self.play(...) or axes.add(...)
+            if isinstance(node.value, ast.Call):
+                func = node.value.func
+                if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                    var_name = func.value.id
+                    method_name = func.attr
+                    # Skip self.play, self.wait, self.add - these are scene methods
+                    if var_name != "self":
+                        key = var_types.get(var_name, var_name)
+                        sequences[key].append(method_name)
+
+            self.generic_visit(node)
+
+    extractor = SequenceExtractor()
+    extractor.visit(tree)
+
+    return dict(sequences)
