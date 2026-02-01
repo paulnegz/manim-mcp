@@ -49,6 +49,9 @@ class CEToManimglTransformer(ast.NodeTransformer):
         "Cross": "VGroup",  # CE-only, fallback
         "Checkmark": "Tex",  # CE-only
         "Exmark": "Tex",  # CE-only
+        # Path tracing (both support TracedPath, ensure it's recognized)
+        "TracedPath": "TracedPath",  # Same in both, but ensure proper handling
+        "VMobjectTrace": "TracedPath",  # CE alias
     }
 
     # CE function/animation names → manimgl equivalents
@@ -559,7 +562,69 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
     # Step 8: Fix animate syntax differences
     code = _fix_animate_syntax(code, transformations)
 
+    # Step 9: Fix TracedPath and always_redraw patterns
+    code = _fix_traced_path_and_updaters(code, transformations)
+
     return code, transformations
+
+
+def _fix_traced_path_and_updaters(code: str, transformations: list[str]) -> str:
+    """Fix TracedPath and always_redraw patterns that often cause runtime errors.
+
+    Common issues:
+    1. TracedPath with incorrect callable signature
+    2. always_redraw with set_value() instead of get_value()
+    3. add_updater with dt parameter when not needed
+    """
+    import re
+
+    # Fix 1: TracedPath needs a callable that returns a point
+    # Common mistake: TracedPath(mob.get_center) instead of TracedPath(mob.get_center)
+    # Actually this is usually correct, but let's handle traced_func issues
+
+    # Fix 2: Warn about set_value in always_redraw (should be get_value)
+    # Pattern: always_redraw(lambda: ... .set_value( ... )
+    # This is a logic error - you read values in updaters, not set them
+    if "always_redraw" in code and ".set_value(" in code:
+        # Check if set_value appears in an always_redraw lambda
+        pattern = r"always_redraw\s*\(\s*lambda[^:]*:\s*[^)]*\.set_value\s*\("
+        if re.search(pattern, code):
+            # Can't auto-fix this - it's a logic error
+            # But log a warning that will help in debugging
+            transformations.append(
+                "WARNING: set_value() found in always_redraw - should probably be get_value()"
+            )
+
+    # Fix 3: Common always_redraw pattern issues
+    # always_redraw(lambda dt: ...) - dt parameter is wrong for always_redraw
+    # always_redraw takes no arguments, add_updater takes optional dt
+    pattern = r"always_redraw\s*\(\s*lambda\s+dt\s*:"
+    if re.search(pattern, code):
+        code = re.sub(pattern, "always_redraw(lambda:", code)
+        transformations.append("updater-fix: always_redraw lambda dt → lambda (no params)")
+
+    # Fix 4: add_updater with dt when updating mobject based on another
+    # Pattern: mob.add_updater(lambda m, dt: m.become(...))
+    # This often doesn't need dt, but it's not wrong, so just note it
+
+    # Fix 5: TracedPath dissipating_time parameter (CE-only)
+    # Remove dissipating_time if present (manimgl uses different approach)
+    pattern = r"TracedPath\s*\([^)]*dissipating_time\s*=\s*[^,)]+[,)]"
+    if re.search(pattern, code):
+        code = re.sub(r",\s*dissipating_time\s*=\s*[^,)]+", "", code)
+        code = re.sub(r"dissipating_time\s*=\s*[^,)]+\s*,\s*", "", code)
+        transformations.append("traced-path-fix: removed CE-only dissipating_time param")
+
+    # Fix 6: TracedPath stroke_color vs color parameter
+    # manimgl uses stroke_color, CE might use color
+    pattern = r"TracedPath\s*\([^)]*\bcolor\s*="
+    if re.search(pattern, code):
+        # Only fix if there's no stroke_color already
+        if "stroke_color" not in code:
+            code = re.sub(r"(TracedPath\s*\([^)]*)(\bcolor\s*=)", r"\1stroke_color=", code)
+            transformations.append("traced-path-fix: color → stroke_color")
+
+    return code
 
 
 def _fix_3d_camera(code: str, transformations: list[str]) -> str:
@@ -711,9 +776,38 @@ def _fix_animate_syntax(code: str, transformations: list[str]) -> str:
     Both use .animate, but there are subtle differences in method chaining.
     CE: mob.animate.scale(2).shift(UP)
     manimgl: Same, but some methods differ
+
+    CRITICAL: ValueTracker.set_value() vs ValueTracker.animate.set_value()
+    - tracker.set_value(x) - immediate update, NOT animatable
+    - tracker.animate.set_value(x) - animated update, USE THIS in self.play()
     """
     # CE uses .animate.set_color() but manimgl might prefer .animate.set_fill()
     # This is generally compatible, but let's handle edge cases
+
+    # CRITICAL FIX: ValueTracker set_value in self.play() context
+    # LLM often generates: self.play(tracker.set_value, value, run_time=...)
+    # Should be: self.play(tracker.animate.set_value(value), run_time=...)
+    # Pattern 1: self.play(name.set_value, value, ...) - method reference with separate arg
+    pattern1 = r"self\.play\s*\(\s*(\w+)\.set_value\s*,\s*([^,\)]+)"
+    if re.search(pattern1, code):
+        code = re.sub(pattern1, r"self.play(\1.animate.set_value(\2)", code)
+        transformations.append("valuetracker-fix: tracker.set_value, val → tracker.animate.set_value(val)")
+
+    # Pattern 2: self.play(name.set_value(value), ...) - direct call without animate
+    # Need to be careful not to match tracker.animate.set_value which is correct
+    pattern2 = r"self\.play\s*\(\s*(\w+)\.set_value\s*\(([^)]+)\)"
+    if re.search(pattern2, code):
+        # Check it's not already using .animate
+        if not re.search(r"self\.play\s*\(\s*\w+\.animate\.set_value", code):
+            code = re.sub(pattern2, r"self.play(\1.animate.set_value(\2))", code)
+            transformations.append("valuetracker-fix: tracker.set_value(val) → tracker.animate.set_value(val)")
+
+    # Pattern 3: LaggedStart or AnimationGroup containing set_value
+    # e.g., LaggedStart(tracker.set_value, 5) or AnimationGroup(t.set_value(x))
+    pattern3 = r"(LaggedStart|AnimationGroup|Succession)\s*\(\s*(\w+)\.set_value\s*,\s*([^,\)]+)"
+    if re.search(pattern3, code):
+        code = re.sub(pattern3, r"\1(\2.animate.set_value(\3)", code)
+        transformations.append("valuetracker-fix: animation wrapper with set_value")
 
     # Fix animate.become() which doesn't exist - use Transform instead
     # CE: self.play(mob.animate.become(other))

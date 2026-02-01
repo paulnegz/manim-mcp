@@ -45,6 +45,12 @@ def _check_llm_api_key(config: ManimMCPConfig) -> None:
                 "MANIM_MCP_CLAUDE_API_KEY must be set when using Claude provider. "
                 "Get an API key at: https://console.anthropic.com/"
             )
+    elif provider == "deepseek":
+        if not config.deepseek_api_key:
+            raise RuntimeError(
+                "MANIM_MCP_DEEPSEEK_API_KEY must be set when using DeepSeek provider. "
+                "Get an API key at: https://platform.deepseek.com/"
+            )
     else:  # gemini (default)
         if not config.gemini_api_key:
             raise RuntimeError(
@@ -129,10 +135,12 @@ async def app_context(config: ManimMCPConfig | None = None) -> AsyncIterator[App
     )
 
     # Determine which model name to show
-    model_name = (
-        config.claude_model if config.llm_provider == "claude"
-        else config.gemini_model
-    )
+    if config.llm_provider == "claude":
+        model_name = config.claude_model
+    elif config.llm_provider == "deepseek":
+        model_name = config.deepseek_model
+    else:
+        model_name = config.gemini_model
 
     logger.info(
         "manim-mcp started (LLM: %s/%s, S3: %s, RAG: %s, max concurrent: %d)",

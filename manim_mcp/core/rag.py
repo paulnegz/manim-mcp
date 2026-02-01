@@ -808,6 +808,8 @@ class ChromaDBService:
 
         try:
             import hashlib
+            from datetime import datetime
+
             # Create unique ID from error + code hash
             content_hash = hashlib.sha256(f"{error_message}{code[:500]}".encode()).hexdigest()[:16]
             doc_id = f"err_{content_hash}"
@@ -815,9 +817,14 @@ class ChromaDBService:
             # Parse error reason from message
             error_reason = self._parse_error_reason(error_message)
 
+            # Normalize error for better semantic matching
+            normalized_error = self._normalize_error_pattern(error_message)
+
             # Format document for retrieval with both original and transformed code
+            # Include normalized version for better similarity search
             parts = [
                 f"ERROR: {error_message}",
+                f"\nNORMALIZED: {normalized_error}",
                 f"\nREASON: {error_reason}",
                 f"\nORIGINAL_CODE (what LLM generated):\n```python\n{code[:2000]}\n```",
             ]
@@ -833,14 +840,36 @@ class ChromaDBService:
 
             document = "\n".join(parts)
 
+            # Check if this pattern already exists (to preserve success tracking)
+            existing = None
+            try:
+                existing_result = self._errors_collection.get(ids=[doc_id], include=["metadatas"])
+                if existing_result and existing_result.get("metadatas"):
+                    existing = existing_result["metadatas"][0]
+            except Exception:
+                pass  # Pattern doesn't exist yet
+
+            # Build metadata with success tracking
             metadata = {
                 "error_type": self._classify_error(error_message),
                 "error_reason": error_reason[:200],
+                "normalized_error": normalized_error[:300],
                 "has_fix": fix is not None,
                 "has_transformed": transformed_code is not None,
                 "code_length": len(code),
                 "prompt": (prompt or "")[:200],
+                # Success tracking - preserve existing or initialize
+                "success_count": existing.get("success_count", 1 if fix else 0) if existing else (1 if fix else 0),
+                "attempt_count": existing.get("attempt_count", 1) if existing else 1,
+                "created_at": existing.get("created_at", datetime.now().isoformat()) if existing else datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
             }
+
+            # Calculate success rate
+            if metadata["attempt_count"] > 0:
+                metadata["success_rate"] = metadata["success_count"] / metadata["attempt_count"]
+            else:
+                metadata["success_rate"] = 0.0
 
             self._errors_collection.upsert(
                 ids=[doc_id],
@@ -848,8 +877,8 @@ class ChromaDBService:
                 metadatas=[metadata],
             )
 
-            logger.info("[RAG] Stored error pattern: %s (reason=%s, has_fix=%s)",
-                       error_message[:50], error_reason[:30], fix is not None)
+            logger.info("[RAG] Stored error pattern: %s (reason=%s, has_fix=%s, success_rate=%.2f)",
+                       error_message[:50], error_reason[:30], fix is not None, metadata["success_rate"])
             return True
 
         except Exception as e:
@@ -866,6 +895,8 @@ class ChromaDBService:
              lambda m: f"{m.group(1)} doesn't have method/attribute '{m.group(2)}' in manimgl"),
             (r"TypeError: .*unexpected keyword argument '(\w+)'",
              lambda m: f"Parameter '{m.group(1)}' doesn't exist in manimgl"),
+            (r"TypeError: Object .* cannot be converted to an animation",
+             lambda m: "Method used in self.play() is not animatable - use .animate.method()"),
             (r"ImportError: cannot import name '(\w+)'",
              lambda m: f"'{m.group(1)}' doesn't exist in manimgl"),
             (r"NameError: name '(\w+)' is not defined",
@@ -888,6 +919,129 @@ class ChromaDBService:
                 return line.strip()[:100]
 
         return "Unknown error"
+
+    def _normalize_error_pattern(self, error_message: str) -> str:
+        """Normalize error message for better semantic matching.
+
+        Generalizes specific details (class names, line numbers, variable names)
+        into placeholders so similar errors can match even with different specifics.
+
+        Example:
+            "'MyClass' object has no attribute 'foo'"
+            becomes "'<CLASS>' object has no attribute '<ATTR>'"
+
+        This improves retrieval of similar error patterns.
+        """
+        import re
+
+        normalized = error_message
+
+        # Replace specific class names with placeholder
+        normalized = re.sub(r"'(\w+)' object", "'<CLASS>' object", normalized)
+
+        # Replace specific attribute/method names in AttributeError
+        normalized = re.sub(
+            r"has no attribute '(\w+)'",
+            "has no attribute '<ATTR>'",
+            normalized
+        )
+
+        # Replace specific parameter names in TypeError
+        normalized = re.sub(
+            r"unexpected keyword argument '(\w+)'",
+            "unexpected keyword argument '<PARAM>'",
+            normalized
+        )
+
+        # Replace line numbers
+        normalized = re.sub(r"line \d+", "line <N>", normalized)
+        normalized = re.sub(r"Line \d+", "Line <N>", normalized)
+
+        # Replace column numbers
+        normalized = re.sub(r"column \d+", "column <N>", normalized)
+        normalized = re.sub(r"col \d+", "col <N>", normalized)
+
+        # Replace file paths (keep just filename pattern)
+        normalized = re.sub(r'/tmp/[^/]+/', '/tmp/<TMP>/', normalized)
+
+        # Replace hex addresses
+        normalized = re.sub(r'0x[0-9a-fA-F]+', '0x<ADDR>', normalized)
+
+        # Replace specific variable/function names in NameError
+        normalized = re.sub(
+            r"name '(\w+)' is not defined",
+            "name '<NAME>' is not defined",
+            normalized
+        )
+
+        return normalized
+
+    async def update_error_pattern_success(
+        self,
+        error_message: str,
+        code: str,
+        success: bool = True,
+    ) -> bool:
+        """Update success tracking for an error pattern.
+
+        Called when a fix from RAG was applied and we know if it worked.
+        This helps prioritize patterns with higher success rates in retrieval.
+
+        Args:
+            error_message: The original error message
+            code: The code that had the error
+            success: Whether the fix worked
+
+        Returns:
+            True if updated successfully
+        """
+        if not self.available or not self._errors_collection:
+            return False
+
+        try:
+            import hashlib
+            from datetime import datetime
+
+            # Find the pattern by ID
+            content_hash = hashlib.sha256(f"{error_message}{code[:500]}".encode()).hexdigest()[:16]
+            doc_id = f"err_{content_hash}"
+
+            # Get existing document
+            result = self._errors_collection.get(ids=[doc_id], include=["metadatas"])
+
+            if not result or not result.get("metadatas"):
+                return False
+
+            metadata = result["metadatas"][0] if result["metadatas"] else {}
+
+            # Update success tracking
+            success_count = metadata.get("success_count", 0)
+            attempt_count = metadata.get("attempt_count", 0)
+
+            if success:
+                success_count += 1
+            attempt_count += 1
+
+            # Update metadata
+            metadata["success_count"] = success_count
+            metadata["attempt_count"] = attempt_count
+            metadata["success_rate"] = success_count / attempt_count if attempt_count > 0 else 0
+            metadata["last_used"] = datetime.now().isoformat()
+
+            self._errors_collection.update(
+                ids=[doc_id],
+                metadatas=[metadata],
+            )
+
+            logger.debug(
+                "[RAG] Updated error pattern success: %s (success_rate=%.2f, attempts=%d)",
+                doc_id[:8], metadata["success_rate"], attempt_count
+            )
+            return True
+
+        except Exception as e:
+            logger.warning("Failed to update error pattern success: %s", e)
+            return False
 
     async def get_collection_stats(self) -> dict:
         """Get statistics about all collections.

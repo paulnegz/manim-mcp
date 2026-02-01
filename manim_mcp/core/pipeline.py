@@ -730,6 +730,54 @@ class AnimationPipeline:
 
         return output
 
+    async def _get_preflight_warnings(self, prompt: str) -> list[str]:
+        """Get warnings based on similar failed prompts from error patterns.
+
+        Queries the error patterns collection for prompts similar to the current one
+        that have failed before, and extracts actionable warnings.
+
+        Args:
+            prompt: The user's animation prompt
+
+        Returns:
+            List of warning messages about common pitfalls for similar animations
+        """
+        if not self.rag or not self.rag.available:
+            return []
+
+        warnings = []
+        try:
+            # Query error patterns for similar prompts
+            similar_errors = await self.rag.search_error_patterns(prompt, n_results=5)
+
+            for error in similar_errors:
+                metadata = error.get("metadata", {})
+                # Only warn about patterns with low success rate or no fix
+                success_rate = metadata.get("success_rate", 0)
+                has_fix = metadata.get("has_fix", False)
+
+                if success_rate < 0.5 or not has_fix:
+                    error_reason = metadata.get("error_reason", "")
+                    error_type = metadata.get("error_type", "")
+
+                    if error_reason and error_reason not in warnings:
+                        # Format warning for LLM
+                        warning = f"- {error_reason}"
+                        if error_type:
+                            warning = f"- [{error_type}] {error_reason}"
+                        warnings.append(warning)
+
+            # Limit to most relevant warnings
+            warnings = warnings[:5]
+
+            if warnings:
+                logger.info("[PRE-FLIGHT] Found %d warnings for similar prompts", len(warnings))
+
+        except Exception as e:
+            logger.debug("[PRE-FLIGHT] Failed to get warnings: %s", e)
+
+        return warnings
+
     async def _generate_and_validate(self, prompt: str, narration_script: list[str] | None = None) -> str:
         """Generate code with optional RAG context and validate.
 
@@ -751,6 +799,18 @@ class AnimationPipeline:
                     enhanced_prompt = f"{prompt}\n\nHere are some similar animations for reference:\n{rag_context}"
             except Exception as e:
                 logger.warning("[RAG] Failed to query similar scenes: %s", e)
+
+        # Get pre-flight warnings from similar failed prompts
+        preflight_warnings = await self._get_preflight_warnings(prompt)
+        if preflight_warnings:
+            warnings_text = "\n".join(preflight_warnings)
+            enhanced_prompt = f"""{enhanced_prompt}
+
+## KNOWN PITFALLS (from similar animations that failed):
+{warnings_text}
+
+IMPORTANT: Avoid these patterns in your implementation."""
+            logger.info("[PRE-FLIGHT] Injected %d warnings into prompt", len(preflight_warnings))
 
         # If narration script provided, include it to sync code with audio
         if narration_script:
