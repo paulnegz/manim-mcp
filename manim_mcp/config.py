@@ -87,6 +87,9 @@ class ManimMCPConfig(BaseSettings):
     rag_collection_errors: str = "error_patterns"
     rag_collection_api: str = "manim_api"
     rag_collection_patterns: str = "animation_patterns"
+    rag_collection_intro_outro: str = "intro_outro_patterns"
+    rag_collection_characters: str = "character_patterns"
+    rag_collection_legacy: str = "legacy_patterns"
 
     # Enhanced RAG settings (Anthropic Contextual Retrieval approach)
     rag_use_enhanced: bool = True  # Use enhanced RAG with hybrid search

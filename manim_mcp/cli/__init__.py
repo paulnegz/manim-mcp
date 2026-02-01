@@ -90,7 +90,8 @@ def _build_parser() -> argparse.ArgumentParser:
     idx_clear = index_sub.add_parser("clear", help="Clear a RAG collection")
     idx_clear.add_argument(
         "collection",
-        choices=["scenes", "docs", "errors", "api", "patterns", "all"],
+        choices=["scenes", "docs", "errors", "api", "patterns",
+                 "intro-outro", "characters", "legacy", "all"],
         help="Collection to clear",
     )
     idx_clear.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
@@ -109,6 +110,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "api-graph",
         help="Extract method call sequences from indexed scenes for API usage graph",
     )
+
+    # index intro-outro
+    idx_intro_outro = index_sub.add_parser(
+        "intro-outro",
+        help="Index intro/outro patterns (quotes, end screens, banners) from 3b1b/videos",
+    )
+    idx_intro_outro.add_argument("--path", help="Local path to 3b1b/videos repository")
+
+    # index characters
+    idx_characters = index_sub.add_parser(
+        "characters",
+        help="Index pi creature character patterns from 3b1b/videos",
+    )
+    idx_characters.add_argument("--path", help="Local path to 3b1b/videos repository")
+
+    # index legacy
+    idx_legacy = index_sub.add_parser(
+        "legacy",
+        help="Index legacy/archived patterns from 3b1b/videos once_useful_constructs",
+    )
+    idx_legacy.add_argument("--path", help="Local path to 3b1b/videos repository")
 
     return parser
 

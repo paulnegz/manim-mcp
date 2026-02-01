@@ -89,6 +89,12 @@ async def cmd_index(
         return await cmd_index_patterns(args, ctx, printer)
     elif args.index_command == "api-graph":
         return await cmd_index_api_graph(args, ctx, printer)
+    elif args.index_command == "intro-outro":
+        return await cmd_index_intro_outro(args, ctx, printer)
+    elif args.index_command == "characters":
+        return await cmd_index_characters(args, ctx, printer)
+    elif args.index_command == "legacy":
+        return await cmd_index_legacy(args, ctx, printer)
     else:
         printer.error(f"Unknown index command: {args.index_command}")
         return 1
@@ -117,6 +123,9 @@ async def cmd_index_status(
     printer.info(f"  Error patterns: {stats['errors_count']}")
     printer.info(f"  API signatures: {stats['api_count']}")
     printer.info(f"  Animation patterns: {stats['patterns_count']}")
+    printer.info(f"  Intro/outro patterns: {stats['intro_outro_count']}")
+    printer.info(f"  Character patterns: {stats['characters_count']}")
+    printer.info(f"  Legacy patterns: {stats['legacy_count']}")
 
     return 0
 
@@ -234,7 +243,8 @@ async def cmd_index_clear(
         return 1
 
     collection = args.collection
-    valid_collections = ["scenes", "docs", "errors", "api", "patterns", "all"]
+    valid_collections = ["scenes", "docs", "errors", "api", "patterns",
+                         "intro-outro", "characters", "legacy", "all"]
     if collection not in valid_collections:
         printer.error(f"Invalid collection. Choose from: {', '.join(valid_collections)}")
         return 1
@@ -257,6 +267,9 @@ async def cmd_index_clear(
             ctx.config.rag_collection_errors,
             ctx.config.rag_collection_api,
             ctx.config.rag_collection_patterns,
+            ctx.config.rag_collection_intro_outro,
+            ctx.config.rag_collection_characters,
+            ctx.config.rag_collection_legacy,
         ]
     elif collection == "scenes":
         collections_to_clear = [ctx.config.rag_collection_scenes]
@@ -268,6 +281,12 @@ async def cmd_index_clear(
         collections_to_clear = [ctx.config.rag_collection_api]
     elif collection == "patterns":
         collections_to_clear = [ctx.config.rag_collection_patterns]
+    elif collection == "intro-outro":
+        collections_to_clear = [ctx.config.rag_collection_intro_outro]
+    elif collection == "characters":
+        collections_to_clear = [ctx.config.rag_collection_characters]
+    elif collection == "legacy":
+        collections_to_clear = [ctx.config.rag_collection_legacy]
 
     with spinner(f"Clearing {collection} collection"):
         for coll_name in collections_to_clear:
@@ -892,3 +911,383 @@ def _extract_method_sequences(code: str) -> dict[str, list[str]]:
     extractor.visit(tree)
 
     return dict(sequences)
+
+
+def _extract_class_chunks(content: str, filename: str) -> list[dict]:
+    """Extract class definitions with their docstrings using AST.
+
+    Returns a list of dicts with: name, code, docstring, keywords
+    """
+    import ast
+
+    chunks = []
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        # Fall back to whole file if AST fails
+        return [{"code": content, "name": filename.replace(".py", ""), "keywords": []}]
+
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            class_source = ast.get_source_segment(content, node) or ""
+            docstring = ast.get_docstring(node) or ""
+
+            # Extract method names as keywords
+            methods = [m.name for m in node.body if isinstance(m, ast.FunctionDef)]
+
+            chunks.append({
+                "name": node.name,
+                "code": class_source,
+                "docstring": docstring,
+                "keywords": methods[:10],  # Limit keywords
+            })
+
+    # If no classes found, try to extract functions
+    if not chunks:
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.FunctionDef):
+                func_source = ast.get_source_segment(content, node) or ""
+                docstring = ast.get_docstring(node) or ""
+
+                chunks.append({
+                    "name": node.name,
+                    "code": func_source,
+                    "docstring": docstring,
+                    "keywords": [],
+                })
+
+    return chunks if chunks else [{"code": content, "name": filename.replace(".py", ""), "keywords": []}]
+
+
+async def cmd_index_intro_outro(
+    args: argparse.Namespace,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Index intro/outro patterns from 3b1b/videos custom directory.
+
+    Extracts patterns from:
+    - custom/opening_quote.py (video intros with quotes)
+    - custom/end_screen.py (patron credits, outros)
+    - custom/banner.py (video banners, thumbnails)
+    """
+    import asyncio
+    from manim_mcp.cli.output import spinner
+
+    if not ctx.rag.available:
+        printer.error("ChromaDB not available - cannot index")
+        return 1
+
+    # Determine source path
+    if hasattr(args, "path") and args.path:
+        repo_path = Path(args.path)
+        if not repo_path.exists():
+            printer.error(f"Path does not exist: {repo_path}")
+            return 1
+        printer.info(f"Using local path: {repo_path}")
+        return await _index_intro_outro_files(repo_path, ctx, printer)
+
+    # Clone to temp directory
+    printer.info("Cloning 3b1b/videos repository for intro/outro patterns...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_path = Path(tmpdir) / "videos"
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", "--filter=blob:none",
+            "--sparse", REPO_3B1B_VIDEOS, str(repo_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+        # Sparse checkout only custom/ directory
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(repo_path), "sparse-checkout", "set", "custom",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+        return await _index_intro_outro_files(repo_path, ctx, printer)
+
+
+async def _index_intro_outro_files(
+    repo_path: Path,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Index intro/outro pattern files."""
+    from manim_mcp.cli.output import spinner
+
+    custom_path = repo_path / "custom"
+    target_files = {
+        "opening_quote.py": "intro",
+        "end_screen.py": "outro",
+        "banner.py": "banner",
+    }
+
+    indexed = 0
+    with spinner("Indexing intro/outro patterns"):
+        for filename, pattern_type in target_files.items():
+            file_path = custom_path / filename
+            if not file_path.exists():
+                printer.warn(f"File not found: {file_path}")
+                continue
+
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+
+            # Extract classes and their docstrings
+            chunks = _extract_class_chunks(content, filename)
+
+            for chunk in chunks:
+                doc = f"""# {pattern_type.title()} Pattern: {chunk['name']}
+
+## Source File
+{filename}
+
+## Description
+{chunk.get('docstring', 'No description available')}
+
+## Code Template
+```python
+{chunk['code']}
+```
+
+## Pattern Type
+{pattern_type}
+
+## Keywords
+{', '.join(chunk.get('keywords', []))}
+"""
+                meta = {
+                    "id": f"intro_outro:{pattern_type}:{chunk['name']}",
+                    "name": chunk["name"],
+                    "pattern_type": pattern_type,
+                    "source_file": filename,
+                    "keywords": ",".join(chunk.get("keywords", [])),
+                }
+
+                doc_id = await ctx.rag.index_intro_outro_pattern(doc, metadata=meta)
+                if doc_id:
+                    indexed += 1
+
+    printer.success(f"Indexed {indexed} intro/outro patterns")
+    return 0
+
+
+async def cmd_index_characters(
+    args: argparse.Namespace,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Index pi creature character patterns from 3b1b/videos custom/characters."""
+    import asyncio
+    from manim_mcp.cli.output import spinner
+
+    if not ctx.rag.available:
+        printer.error("ChromaDB not available - cannot index")
+        return 1
+
+    # Determine source path
+    if hasattr(args, "path") and args.path:
+        repo_path = Path(args.path)
+        if not repo_path.exists():
+            printer.error(f"Path does not exist: {repo_path}")
+            return 1
+        printer.info(f"Using local path: {repo_path}")
+        return await _index_character_files(repo_path, ctx, printer)
+
+    printer.info("Cloning 3b1b/videos repository for character patterns...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_path = Path(tmpdir) / "videos"
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", "--filter=blob:none",
+            "--sparse", REPO_3B1B_VIDEOS, str(repo_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(repo_path), "sparse-checkout", "set", "custom/characters",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+        return await _index_character_files(repo_path, ctx, printer)
+
+
+async def _index_character_files(
+    repo_path: Path,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Index character pattern files."""
+    from manim_mcp.cli.output import spinner
+
+    characters_path = repo_path / "custom" / "characters"
+    target_files = [
+        "pi_creature.py",
+        "pi_creature_animations.py",
+        "pi_creature_scene.py",
+    ]
+
+    indexed = 0
+    with spinner("Indexing character patterns"):
+        for filename in target_files:
+            file_path = characters_path / filename
+            if not file_path.exists():
+                printer.warn(f"File not found: {file_path}")
+                continue
+
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+
+            # Extract classes and methods
+            chunks = _extract_class_chunks(content, filename)
+
+            for chunk in chunks:
+                # Determine character category
+                category = "core" if "pi_creature.py" == filename else (
+                    "animation" if "animations" in filename else "scene"
+                )
+
+                doc = f"""# Pi Creature Pattern: {chunk['name']}
+
+## Category
+{category}
+
+## Source File
+{filename}
+
+## Description
+{chunk.get('docstring', 'Pi creature related functionality')}
+
+## Code
+```python
+{chunk['code']}
+```
+
+## Keywords
+pi creature, character, {', '.join(chunk.get('keywords', []))}
+"""
+                meta = {
+                    "id": f"character:{category}:{chunk['name']}",
+                    "name": chunk["name"],
+                    "category": category,
+                    "source_file": filename,
+                    "character_type": "pi_creature",
+                }
+
+                doc_id = await ctx.rag.index_character_pattern(doc, metadata=meta)
+                if doc_id:
+                    indexed += 1
+
+    printer.success(f"Indexed {indexed} character patterns")
+    return 0
+
+
+async def cmd_index_legacy(
+    args: argparse.Namespace,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Index legacy/archived patterns from 3b1b/videos once_useful_constructs."""
+    import asyncio
+    from manim_mcp.cli.output import spinner
+
+    if not ctx.rag.available:
+        printer.error("ChromaDB not available - cannot index")
+        return 1
+
+    if hasattr(args, "path") and args.path:
+        repo_path = Path(args.path)
+        if not repo_path.exists():
+            printer.error(f"Path does not exist: {repo_path}")
+            return 1
+        printer.info(f"Using local path: {repo_path}")
+        return await _index_legacy_files(repo_path, ctx, printer)
+
+    printer.info("Cloning 3b1b/videos repository for legacy patterns...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_path = Path(tmpdir) / "videos"
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", "--filter=blob:none",
+            "--sparse", REPO_3B1B_VIDEOS, str(repo_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(repo_path), "sparse-checkout", "set", "once_useful_constructs",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+        return await _index_legacy_files(repo_path, ctx, printer)
+
+
+async def _index_legacy_files(
+    repo_path: Path,
+    ctx: AppContext,
+    printer: Printer,
+) -> int:
+    """Index legacy pattern files."""
+    from manim_mcp.cli.output import spinner
+
+    legacy_path = repo_path / "once_useful_constructs"
+
+    indexed = 0
+    with spinner("Indexing legacy patterns"):
+        for file_path in legacy_path.glob("*.py"):
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+
+            # Skip very short files
+            if len(content) < 100:
+                continue
+
+            # Extract classes
+            chunks = _extract_class_chunks(content, file_path.name)
+
+            for chunk in chunks:
+                # Determine domain from filename
+                domain = file_path.stem.replace("_", " ").title()
+
+                doc = f"""# Legacy Pattern: {chunk['name']}
+
+## Domain
+{domain}
+
+## Status
+Archived/Deprecated - may need updates for current manimgl
+
+## Source File
+once_useful_constructs/{file_path.name}
+
+## Description
+{chunk.get('docstring', 'Legacy construct from 3b1b codebase')}
+
+## Code
+```python
+{chunk['code']}
+```
+
+## Note
+This is an archived pattern. It may require modifications to work with current manimgl versions.
+"""
+                meta = {
+                    "id": f"legacy:{file_path.stem}:{chunk['name']}",
+                    "name": chunk["name"],
+                    "domain": domain,
+                    "source_file": file_path.name,
+                    "status": "archived",
+                }
+
+                doc_id = await ctx.rag.index_legacy_pattern(doc, metadata=meta)
+                if doc_id:
+                    indexed += 1
+
+    printer.success(f"Indexed {indexed} legacy patterns")
+    return 0

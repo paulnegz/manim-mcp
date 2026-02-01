@@ -5026,6 +5026,210 @@ for n in [4, 8, 16, 32]:
         math_concepts=["integral", "riemann sum", "calculus", "approximation"],
         keywords=["always_redraw", "get_riemann_rectangles", "reactive", "n_tracker"],
     ),
+
+    # === INTRO/OUTRO PATTERNS ===
+    AnimationPattern(
+        name="opening_quote",
+        category="intro",
+        description="""
+Display an opening quote with attribution, fading in with a cinematic feel.
+Classic 3b1b video intro style.
+""",
+        code_template="""
+# Opening quote scene
+quote = Tex(r'"Mathematics is the language of nature."')
+quote.to_edge(UP, buff=1)
+
+author = Tex("-- Richard Feynman", color=YELLOW)
+author.next_to(quote, DOWN, buff=0.5)
+
+self.play(FadeIn(quote, run_time=3, rate_func=linear))
+self.wait(0.5)
+self.play(Write(author, run_time=2))
+self.wait(2)
+self.play(FadeOut(quote), FadeOut(author))
+""",
+        math_concepts=["introduction", "quote", "attribution"],
+        keywords=["opening", "quote", "intro", "FadeIn", "cinematic"],
+    ),
+
+    AnimationPattern(
+        name="end_screen_credits",
+        category="outro",
+        description="""
+Create an end screen with scrolling patron credits.
+Includes thanks message and support links.
+""",
+        code_template="""
+# End screen with scrolling names
+title = Text("Thanks to Patrons", font_size=48)
+title.to_edge(UP)
+
+# Name list (example)
+names = ["Patron 1", "Patron 2", "Patron 3"]
+name_mobjects = VGroup(*[Text(name, font_size=24) for name in names])
+name_mobjects.arrange(DOWN, buff=0.2)
+name_mobjects.next_to(title, DOWN, buff=1)
+
+self.play(Write(title))
+self.wait(0.5)
+
+# Scroll names
+self.play(
+    name_mobjects.animate.shift(UP * len(names) * 0.4),
+    run_time=len(names) * 0.3,
+    rate_func=linear
+)
+""",
+        math_concepts=["credits", "scrolling", "outro"],
+        keywords=["end screen", "credits", "patron", "scroll", "outro"],
+    ),
+
+    AnimationPattern(
+        name="video_banner",
+        category="banner",
+        description="""
+Create a video banner/thumbnail with title and characters.
+High-resolution branding for video previews.
+""",
+        code_template="""
+# Banner with title and pi creatures
+# Note: Use InteractiveScene or high-res camera
+
+title = Text("Video Title", font_size=72)
+title.to_edge(UP, buff=0.5)
+
+# Subtitle or date
+subtitle = Text("Episode 1", font_size=36, color=GRAY)
+subtitle.next_to(title, DOWN)
+
+# Background elements
+grid = NumberPlane(
+    x_range=[-10, 10], y_range=[-6, 6],
+    background_line_style={"stroke_opacity": 0.3}
+)
+
+self.add(grid)
+self.play(Write(title), FadeIn(subtitle, shift=UP))
+# Add pi creatures or other branding elements
+""",
+        math_concepts=["branding", "thumbnail", "title"],
+        keywords=["banner", "thumbnail", "title", "branding"],
+    ),
+
+    # === CHARACTER PATTERNS ===
+    AnimationPattern(
+        name="pi_creature_intro",
+        category="character",
+        description="""
+Introduce a pi creature character with a greeting animation.
+The creature waves, blinks, and displays a speech bubble.
+Requires PiCreature from 3b1b's custom library.
+""",
+        code_template="""
+# Pi creature greeting (requires PiCreature from 3b1b library)
+# from custom.characters.pi_creature import PiCreature
+
+pi = PiCreature(color=BLUE)
+pi.to_edge(DOWN)
+
+# Wave animation with speech bubble
+self.play(PiCreatureSays(
+    pi,
+    "Hello!",
+    bubble_type="speech",
+    target_mode="happy"
+))
+self.wait()
+
+# Thinking pose
+self.play(pi.change_mode("pondering"))
+self.wait()
+
+# Return to normal
+self.play(pi.change_mode("plain"))
+""",
+        math_concepts=["character", "mascot", "introduction"],
+        keywords=["pi creature", "character", "wave", "speech bubble", "greeting"],
+    ),
+
+    AnimationPattern(
+        name="pi_creature_explanation",
+        category="character",
+        description="""
+Pi creature explaining a concept with gestures and expressions.
+Points at mathematical objects and changes mood.
+Requires PiCreature from 3b1b's custom library.
+""",
+        code_template="""
+# Pi creature explaining (requires PiCreature)
+pi = PiCreature(color=BLUE)
+pi.to_corner(DL)
+
+# Math object to explain
+equation = Tex("E = mc^2").to_edge(UP)
+
+# Look at the equation
+pi.look_at(equation)
+self.play(
+    ShowCreation(equation),
+    pi.change_mode("thinking")
+)
+self.wait()
+
+# Point at specific part
+self.play(
+    pi.change_mode("speaking"),
+    Indicate(equation[2])  # Point at m
+)
+
+# Express understanding
+self.play(pi.change_mode("hooray"))
+""",
+        math_concepts=["explanation", "teaching", "character"],
+        keywords=["pi creature", "explain", "look_at", "point", "expression"],
+    ),
+
+    AnimationPattern(
+        name="teacher_students_scene",
+        category="character",
+        description="""
+A teacher pi creature with multiple student pi creatures.
+Classic 3b1b educational scene layout.
+""",
+        code_template="""
+# TeacherStudentsScene layout (from 3b1b custom)
+# Teacher on the right, students on the left
+
+teacher = PiCreature(color=GREY_BROWN)
+teacher.to_edge(RIGHT)
+teacher.flip()
+
+students = VGroup(*[
+    PiCreature(color=color).scale(0.6)
+    for color in [BLUE_D, BLUE_E, BLUE_C]
+])
+students.arrange(RIGHT, buff=0.5)
+students.to_edge(LEFT)
+
+# All look at teacher
+for student in students:
+    student.look_at(teacher)
+
+self.add(teacher, students)
+
+# Teacher speaks
+self.play(teacher.change_mode("speaking"))
+self.wait()
+
+# Students react
+self.play(*[
+    s.change_mode("thinking") for s in students
+])
+""",
+        math_concepts=["teaching", "education", "classroom"],
+        keywords=["teacher", "students", "pi creature", "classroom", "education"],
+    ),
 ]
 
 

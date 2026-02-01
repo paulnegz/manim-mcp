@@ -31,6 +31,9 @@ class ChromaDBService:
         self._errors_collection = None
         self._api_collection = None
         self._patterns_collection = None
+        self._intro_outro_collection = None
+        self._characters_collection = None
+        self._legacy_collection = None
         self._probe_searcher: ProbeSearcher | None = None
 
     async def initialize(self) -> None:
@@ -112,15 +115,30 @@ class ChromaDBService:
                 name=self.config.rag_collection_patterns,
                 metadata={"description": "3b1b animation patterns and templates"},
             )
+            self._intro_outro_collection = self._client.get_or_create_collection(
+                name=self.config.rag_collection_intro_outro,
+                metadata={"description": "3b1b video intro/outro patterns (quotes, end screens, banners)"},
+            )
+            self._characters_collection = self._client.get_or_create_collection(
+                name=self.config.rag_collection_characters,
+                metadata={"description": "Pi creature character patterns and animations"},
+            )
+            self._legacy_collection = self._client.get_or_create_collection(
+                name=self.config.rag_collection_legacy,
+                metadata={"description": "Legacy/archived 3b1b constructs for reference"},
+            )
 
             self.available = True
             logger.info(
-                "ChromaDB ready (scenes=%d, docs=%d, errors=%d, api=%d, patterns=%d)",
+                "ChromaDB ready (scenes=%d, docs=%d, errors=%d, api=%d, patterns=%d, intro_outro=%d, characters=%d, legacy=%d)",
                 self._scenes_collection.count(),
                 self._docs_collection.count(),
                 self._errors_collection.count(),
                 self._api_collection.count(),
                 self._patterns_collection.count(),
+                self._intro_outro_collection.count(),
+                self._characters_collection.count(),
+                self._legacy_collection.count(),
             )
 
             # Initialize Probe searcher for AST-aware code search
@@ -521,6 +539,105 @@ class ChromaDBService:
             logger.warning("Failed to index animation pattern: %s", e)
             return None
 
+    async def index_intro_outro_pattern(
+        self,
+        pattern_doc: str,
+        metadata: dict | None = None,
+    ) -> str | None:
+        """Index a video intro/outro pattern (opening quote, end screen, banner).
+
+        Args:
+            pattern_doc: Document describing the pattern (code, description)
+            metadata: Metadata including type (intro/outro/banner), source_file
+
+        Returns:
+            Document ID if indexed, None if RAG unavailable
+        """
+        if not self.available or not self._intro_outro_collection:
+            return None
+
+        try:
+            meta = metadata or {}
+            doc_id = meta.get("id") or self._hash_content(pattern_doc)
+
+            self._intro_outro_collection.upsert(
+                ids=[doc_id],
+                documents=[pattern_doc],
+                metadatas=[meta],
+            )
+            logger.debug("Indexed intro/outro pattern: %s", doc_id)
+            return doc_id
+
+        except Exception as e:
+            logger.warning("Failed to index intro/outro pattern: %s", e)
+            return None
+
+    async def index_character_pattern(
+        self,
+        pattern_doc: str,
+        metadata: dict | None = None,
+    ) -> str | None:
+        """Index a pi creature character pattern.
+
+        Args:
+            pattern_doc: Document describing the character pattern
+            metadata: Metadata including character_type, animation_type
+
+        Returns:
+            Document ID if indexed, None if RAG unavailable
+        """
+        if not self.available or not self._characters_collection:
+            return None
+
+        try:
+            meta = metadata or {}
+            doc_id = meta.get("id") or self._hash_content(pattern_doc)
+
+            self._characters_collection.upsert(
+                ids=[doc_id],
+                documents=[pattern_doc],
+                metadatas=[meta],
+            )
+            logger.debug("Indexed character pattern: %s", doc_id)
+            return doc_id
+
+        except Exception as e:
+            logger.warning("Failed to index character pattern: %s", e)
+            return None
+
+    async def index_legacy_pattern(
+        self,
+        pattern_doc: str,
+        metadata: dict | None = None,
+    ) -> str | None:
+        """Index a legacy/archived construct pattern.
+
+        Args:
+            pattern_doc: Document describing the legacy pattern
+            metadata: Metadata including original_module, deprecated_reason
+
+        Returns:
+            Document ID if indexed, None if RAG unavailable
+        """
+        if not self.available or not self._legacy_collection:
+            return None
+
+        try:
+            meta = metadata or {}
+            doc_id = meta.get("id") or self._hash_content(pattern_doc)
+
+            self._legacy_collection.upsert(
+                ids=[doc_id],
+                documents=[pattern_doc],
+                metadatas=[meta],
+            )
+            logger.debug("Indexed legacy pattern: %s", doc_id)
+            return doc_id
+
+        except Exception as e:
+            logger.warning("Failed to index legacy pattern: %s", e)
+            return None
+
     async def search_animation_patterns(
         self,
         query: str,
@@ -549,6 +666,100 @@ class ChromaDBService:
 
         except Exception as e:
             logger.warning("Animation pattern search failed: %s", e)
+            return []
+
+    async def search_intro_outro_patterns(
+        self,
+        query: str,
+        n_results: int = 3,
+        pattern_type: str | None = None,
+    ) -> list[dict]:
+        """Search for intro/outro patterns matching a query.
+
+        Args:
+            query: Description of desired intro/outro effect
+            n_results: Number of results to return
+            pattern_type: Filter by type (intro, outro, banner)
+
+        Returns:
+            List of matching patterns with metadata and code
+        """
+        if not self.available or not self._intro_outro_collection:
+            return []
+
+        try:
+            where_filter = {"pattern_type": pattern_type} if pattern_type else None
+            results = self._intro_outro_collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                where=where_filter,
+                include=["documents", "metadatas", "distances"],
+            )
+
+            return self._format_results(results)
+
+        except Exception as e:
+            logger.warning("Intro/outro pattern search failed: %s", e)
+            return []
+
+    async def search_character_patterns(
+        self,
+        query: str,
+        n_results: int = 3,
+    ) -> list[dict]:
+        """Search for pi creature character patterns.
+
+        Args:
+            query: Description of desired character animation
+            n_results: Number of results to return
+
+        Returns:
+            List of matching character patterns
+        """
+        if not self.available or not self._characters_collection:
+            return []
+
+        try:
+            results = self._characters_collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"],
+            )
+
+            return self._format_results(results)
+
+        except Exception as e:
+            logger.warning("Character pattern search failed: %s", e)
+            return []
+
+    async def search_legacy_patterns(
+        self,
+        query: str,
+        n_results: int = 3,
+    ) -> list[dict]:
+        """Search for legacy/archived construct patterns.
+
+        Args:
+            query: Description of desired construct
+            n_results: Number of results to return
+
+        Returns:
+            List of matching legacy patterns
+        """
+        if not self.available or not self._legacy_collection:
+            return []
+
+        try:
+            results = self._legacy_collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"],
+            )
+
+            return self._format_results(results)
+
+        except Exception as e:
+            logger.warning("Legacy pattern search failed: %s", e)
             return []
 
     async def search_similar_scenes(
@@ -1170,6 +1381,9 @@ class ChromaDBService:
             "errors_count": 0,
             "api_count": 0,
             "patterns_count": 0,
+            "intro_outro_count": 0,
+            "characters_count": 0,
+            "legacy_count": 0,
         }
 
         if not self.available:
@@ -1186,6 +1400,12 @@ class ChromaDBService:
                 stats["api_count"] = self._api_collection.count()
             if self._patterns_collection:
                 stats["patterns_count"] = self._patterns_collection.count()
+            if self._intro_outro_collection:
+                stats["intro_outro_count"] = self._intro_outro_collection.count()
+            if self._characters_collection:
+                stats["characters_count"] = self._characters_collection.count()
+            if self._legacy_collection:
+                stats["legacy_count"] = self._legacy_collection.count()
         except Exception as e:
             logger.warning("Failed to get collection stats: %s", e)
 
@@ -1234,6 +1454,21 @@ class ChromaDBService:
                 self._patterns_collection = self._client.get_or_create_collection(
                     name=collection_name,
                     metadata={"description": "3b1b animation patterns and templates"},
+                )
+            elif collection_name == self.config.rag_collection_intro_outro:
+                self._intro_outro_collection = self._client.get_or_create_collection(
+                    name=collection_name,
+                    metadata={"description": "3b1b video intro/outro patterns"},
+                )
+            elif collection_name == self.config.rag_collection_characters:
+                self._characters_collection = self._client.get_or_create_collection(
+                    name=collection_name,
+                    metadata={"description": "Pi creature character patterns"},
+                )
+            elif collection_name == self.config.rag_collection_legacy:
+                self._legacy_collection = self._client.get_or_create_collection(
+                    name=collection_name,
+                    metadata={"description": "Legacy/archived constructs"},
                 )
             return True
         except Exception as e:
