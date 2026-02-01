@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 class LLMProvider(str, Enum):
     gemini = "gemini"
     claude = "claude"
+    deepseek = "deepseek"
 
 
 def _strip_fences(text: str) -> str:
@@ -237,6 +238,77 @@ class ClaudeClient(BaseLLMClient):
         return await self._retry_with_backoff(_call, self.config.llm_max_retries)
 
 
+# ── DeepSeek Client ───────────────────────────────────────────────────
+
+class DeepSeekClient(BaseLLMClient):
+    """DeepSeek LLM client (OpenAI-compatible API)."""
+
+    def __init__(self, config: ManimMCPConfig) -> None:
+        super().__init__(config)
+        try:
+            from openai import AsyncOpenAI
+            self.client = AsyncOpenAI(
+                api_key=config.deepseek_api_key,
+                base_url=config.deepseek_base_url,
+            )
+            self.model_name = config.deepseek_model
+            self._available = True
+        except ImportError:
+            raise ImportError(
+                "openai package not installed. Install with: pip install openai"
+            )
+
+    async def generate_code(self, prompt: str) -> str:
+        """Generate Manim code from a text description."""
+        async def _call():
+            response = await self.client.chat.completions.create(
+                model=self.model_name,
+                max_tokens=8192,
+                messages=[
+                    {"role": "system", "content": self._generate_system},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            return _strip_fences(response.choices[0].message.content or "")
+
+        return await self._retry_with_backoff(_call, self.config.llm_max_retries)
+
+    async def edit_code(self, original_code: str, instructions: str) -> str:
+        """Edit existing Manim code based on instructions."""
+        user_prompt = f"ORIGINAL CODE:\n{original_code}\n\nEDIT INSTRUCTIONS:\n{instructions}"
+
+        async def _call():
+            response = await self.client.chat.completions.create(
+                model=self.model_name,
+                max_tokens=8192,
+                messages=[
+                    {"role": "system", "content": get_edit_system()},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return _strip_fences(response.choices[0].message.content or "")
+
+        return await self._retry_with_backoff(_call, self.config.llm_max_retries)
+
+    async def fix_code(self, code: str, errors: list[str]) -> str:
+        """Fix code that failed validation."""
+        error_text = "\n".join(f"- {e}" for e in errors)
+        user_prompt = f"CODE:\n{code}\n\nERRORS:\n{error_text}"
+
+        async def _call():
+            response = await self.client.chat.completions.create(
+                model=self.model_name,
+                max_tokens=8192,
+                messages=[
+                    {"role": "system", "content": get_fix_system()},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return _strip_fences(response.choices[0].message.content or "")
+
+        return await self._retry_with_backoff(_call, self.config.llm_max_retries)
+
+
 # ── Factory ───────────────────────────────────────────────────────────
 
 def create_llm_client(config: ManimMCPConfig) -> BaseLLMClient:
@@ -246,7 +318,7 @@ def create_llm_client(config: ManimMCPConfig) -> BaseLLMClient:
         config: Application configuration
 
     Returns:
-        LLM client instance (GeminiClient or ClaudeClient)
+        LLM client instance (GeminiClient, ClaudeClient, or DeepSeekClient)
 
     Raises:
         ValueError: If configured provider is unknown or API key is missing
@@ -260,6 +332,14 @@ def create_llm_client(config: ManimMCPConfig) -> BaseLLMClient:
             )
         logger.info("Using Claude LLM provider (model: %s)", config.claude_model)
         return ClaudeClient(config)
+
+    if provider == LLMProvider.deepseek:
+        if not config.deepseek_api_key:
+            raise ValueError(
+                "MANIM_MCP_DEEPSEEK_API_KEY must be set when using DeepSeek provider"
+            )
+        logger.info("Using DeepSeek LLM provider (model: %s)", config.deepseek_model)
+        return DeepSeekClient(config)
 
     # Default to Gemini
     if not config.gemini_api_key:

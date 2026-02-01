@@ -64,20 +64,18 @@ class RenderTracker:
         await self._db.execute(_CREATE_TABLE)
         for idx_sql in _CREATE_INDEXES:
             await self._db.execute(idx_sql)
-        # Run migrations for existing databases
         await self._run_migrations()
         await self._db.commit()
 
     async def _run_migrations(self) -> None:
         """Run schema migrations for existing databases."""
-        # Check if thumbnail_s3_key column exists
         cursor = await self._db.execute("PRAGMA table_info(renders)")
         columns = {row[1] for row in await cursor.fetchall()}
         if "thumbnail_s3_key" not in columns:
             try:
                 await self._db.execute(_MIGRATION_ADD_THUMBNAIL_KEY)
             except Exception:
-                pass  # Column might already exist
+                pass
 
     async def close(self) -> None:
         if self._db:

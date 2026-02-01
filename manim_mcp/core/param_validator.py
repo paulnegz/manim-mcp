@@ -658,6 +658,216 @@ class ParameterValidator:
         return fixed
 
 
+class AnimationContextValidator:
+    """Validates animation context - ensuring methods in self.play() are animatable.
+
+    This validator catches errors that pass AST validation but fail at runtime,
+    such as using immediate methods (set_value) instead of animated methods
+    (animate.set_value) in self.play() calls.
+
+    Common issues caught:
+    1. tracker.set_value(x) in self.play() - should be tracker.animate.set_value(x)
+    2. mob.method() in self.play() - should be mob.animate.method() for most methods
+    3. Invalid method calls inside always_redraw() or add_updater()
+    """
+
+    # Methods that return Animation objects (can be used directly in self.play())
+    ANIMATION_CLASSES = {
+        "FadeIn", "FadeOut", "Write", "ShowCreation", "Transform", "ReplacementTransform",
+        "GrowFromCenter", "GrowFromPoint", "GrowFromEdge", "Indicate", "Wiggle",
+        "WiggleOutThenIn", "ApplyMethod", "MoveToTarget", "ScaleInPlace", "Uncreate",
+        "DrawBorderThenFill", "ShowPassingFlash", "LaggedStart", "LaggedStartMap",
+        "Succession", "AnimationGroup", "VFadeIn", "VFadeOut", "Flash", "ApplyWave",
+        "Homotopy", "PhaseFlow", "MoveAlongPath", "Rotate", "SpinInFromNothing",
+        "ShrinkToCenter", "GrowArrow", "ShowCreationThenFadeOut", "ShowCreationThenDestruction",
+    }
+
+    # Methods that are IMMEDIATE (not animatable) - must NOT be in self.play() directly
+    # These should use .animate.method() instead
+    IMMEDIATE_METHODS = {
+        "set_value", "get_value", "get_center", "get_width", "get_height",
+        "get_left", "get_right", "get_top", "get_bottom", "get_corner",
+        "get_start", "get_end", "get_length", "get_points", "get_all_points",
+        "copy", "deepcopy", "get_x", "get_y", "get_z", "point_from_proportion",
+    }
+
+    # Methods that ARE animatable (can be used with .animate.method())
+    ANIMATABLE_METHODS = {
+        "shift", "scale", "rotate", "move_to", "next_to", "align_to",
+        "set_color", "set_fill", "set_stroke", "set_opacity", "fade",
+        "stretch", "stretch_to_fit_width", "stretch_to_fit_height",
+        "set_width", "set_height", "become", "match_style", "match_color",
+        "arrange", "arrange_in_grid", "to_edge", "to_corner", "center",
+        "set_x", "set_y", "set_z", "flip", "apply_matrix",
+        "set_value",  # ValueTracker.set_value IS animatable via .animate
+    }
+
+    def __init__(self):
+        self.issues: list[ValidationIssue] = []
+
+    def validate(self, code: str) -> list[ValidationIssue]:
+        """Validate animation context in code.
+
+        Args:
+            code: Python source code to validate
+
+        Returns:
+            List of ValidationIssue objects for any problems found
+        """
+        self.issues = []
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return self.issues
+
+        # Visit all nodes
+        self._visit_tree(tree)
+
+        return self.issues
+
+    def _visit_tree(self, tree: ast.AST) -> None:
+        """Walk the AST and check for animation context issues."""
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                self._check_play_call(node)
+                self._check_updater_call(node)
+
+    def _check_play_call(self, node: ast.Call) -> None:
+        """Check if a self.play() call contains non-animatable methods."""
+        # Check if this is a self.play() call
+        if not self._is_play_call(node):
+            return
+
+        # Check each argument in self.play()
+        for arg in node.args:
+            self._validate_play_argument(arg, node.lineno)
+
+    def _is_play_call(self, node: ast.Call) -> bool:
+        """Check if node is a self.play() call."""
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr == "play":
+                if isinstance(node.func.value, ast.Name):
+                    return node.func.value.id == "self"
+        return False
+
+    def _validate_play_argument(self, arg: ast.expr, line_number: int) -> None:
+        """Validate a single argument to self.play()."""
+        # Pattern 1: Direct method call - mob.method(...)
+        # Should be mob.animate.method(...) for animatable methods
+        if isinstance(arg, ast.Call):
+            if isinstance(arg.func, ast.Attribute):
+                method_name = arg.func.attr
+
+                # Check if this is calling an immediate method directly
+                if method_name in self.IMMEDIATE_METHODS:
+                    # Check if it's via .animate (which is valid)
+                    if not self._is_animate_chain(arg.func):
+                        self.issues.append(ValidationIssue(
+                            method="self.play",
+                            param=method_name,
+                            issue_type="non_animatable_method",
+                            message=f"Method '{method_name}' is not animatable. Use .animate.{method_name}() instead.",
+                            fix=f"animate.{method_name}",
+                            line_number=line_number,
+                        ))
+
+        # Pattern 2: Method reference without call - tracker.set_value (missing parentheses)
+        # This is a common LLM error: self.play(tracker.set_value, value, ...)
+        if isinstance(arg, ast.Attribute):
+            if arg.attr in self.IMMEDIATE_METHODS:
+                if not self._is_animate_chain(arg):
+                    self.issues.append(ValidationIssue(
+                        method="self.play",
+                        param=arg.attr,
+                        issue_type="method_reference_in_play",
+                        message=f"Method reference '{arg.attr}' in self.play() - should be .animate.{arg.attr}(value).",
+                        fix=f"animate.{arg.attr}",
+                        line_number=line_number,
+                    ))
+
+    def _is_animate_chain(self, node: ast.Attribute) -> bool:
+        """Check if an attribute access is via .animate property.
+
+        Returns True for patterns like: mob.animate.set_color
+        """
+        # Walk up the attribute chain looking for .animate
+        current = node.value
+        while isinstance(current, ast.Attribute):
+            if current.attr == "animate":
+                return True
+            current = current.value
+        return False
+
+    def _check_updater_call(self, node: ast.Call) -> None:
+        """Check for issues in always_redraw() or add_updater() callbacks."""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+
+        if func_name not in ("always_redraw", "add_updater"):
+            return
+
+        # Check the lambda/function argument
+        for arg in node.args:
+            if isinstance(arg, ast.Lambda):
+                # Validate lambda body - look for potentially invalid method calls
+                self._validate_updater_body(arg.body, node.lineno, func_name)
+
+    def _validate_updater_body(self, body: ast.expr, line_number: int, context: str) -> None:
+        """Validate the body of an updater callback.
+
+        Looks for common issues like calling methods that don't exist or
+        using incorrect API patterns.
+        """
+        # Walk the lambda body for method calls
+        for sub_node in ast.walk(body):
+            if isinstance(sub_node, ast.Call):
+                if isinstance(sub_node.func, ast.Attribute):
+                    method_name = sub_node.func.attr
+
+                    # Warn about potentially problematic patterns
+                    # (More validation could be added here in the future)
+                    if method_name == "set_value" and context == "always_redraw":
+                        # set_value in always_redraw is usually a bug
+                        self.issues.append(ValidationIssue(
+                            method=context,
+                            param=method_name,
+                            issue_type="suspicious_updater_pattern",
+                            message=f"Using '{method_name}' in {context}() may cause issues. "
+                                    f"Use get_value() to read tracker values in updaters.",
+                            fix=None,
+                            line_number=line_number,
+                        ))
+
+
+def validate_animation_context(code: str) -> tuple[str, list[ValidationIssue]]:
+    """Validate animation context and return issues.
+
+    This should be called after code_bridge transformations but before rendering
+    to catch context-dependent errors that pass AST validation.
+
+    Args:
+        code: Python source code to validate
+
+    Returns:
+        Tuple of (code, issues) - code is unchanged, issues contains any problems found
+    """
+    validator = AnimationContextValidator()
+    issues = validator.validate(code)
+
+    if issues:
+        logger.warning(
+            "[ANIMATION-CONTEXT] Found %d issues: %s",
+            len(issues),
+            "; ".join(f"{i.method}.{i.param}: {i.message[:50]}" for i in issues[:3])
+        )
+
+    return code, issues
+
+
 def clear_api_cache() -> int:
     """Clear the API signature cache.
 

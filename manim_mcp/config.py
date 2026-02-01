@@ -52,7 +52,7 @@ class ManimMCPConfig(BaseSettings):
     log_level: str = "INFO"
 
     # LLM Provider settings
-    llm_provider: str = "gemini"  # gemini or claude
+    llm_provider: str = "gemini"  # gemini, claude, or deepseek
     llm_max_retries: int = 3
     llm_timeout: int = 60  # seconds
 
@@ -63,6 +63,11 @@ class ManimMCPConfig(BaseSettings):
     # Claude settings
     claude_api_key: str = ""
     claude_model: str = "claude-sonnet-4-20250514"
+
+    # DeepSeek settings
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-coder"
+    deepseek_base_url: str = "https://api.deepseek.com"
 
     latex_available: bool = False
 
