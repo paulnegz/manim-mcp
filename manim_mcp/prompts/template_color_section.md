@@ -10,19 +10,18 @@ SECTION HEADER:
 
 YOUR TASK:
 Generate ONLY the color definitions that will be used in this animation.
+Define colors as variables like: PRIMARY_COLOR = BLUE
 
 RULES:
-1. Use descriptive variable names (e.g., primary_color, accent_color, background_highlight)
-2. Assign Manim color constants (BLUE, RED, GREEN, YELLOW, WHITE, etc.)
-3. Can use color variants (BLUE_A, BLUE_B, BLUE_C, BLUE_D, BLUE_E)
-4. DO NOT shadow Manim built-ins (don't write BLUE = BLUE)
-5. Use ALL_CAPS for color variable names
-6. One color definition per line
-7. Only define colors that will actually be used
+- Output ONLY Python code, no explanations
+- Define 2-4 color variables using Manim color constants (BLUE, RED, GREEN, YELLOW, etc.)
+- Use descriptive names like PRIMARY_COLOR, SECONDARY_COLOR, ACCENT_COLOR
+- Do NOT include any self.play(), self.wait(), or animation code
+- Do NOT include comments (the section header is already present)
 
-EXAMPLE OUTPUT:
-PRIMARY_COLOR = BLUE_D
-ACCENT_COLOR = YELLOW
-HIGHLIGHT_COLOR = GREEN_B
+CONTEXT (code after this section):
+```python
+{suffix}
+```
 
 Generate the color definitions:

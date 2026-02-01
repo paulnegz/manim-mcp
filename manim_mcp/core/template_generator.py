@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
+from manim_mcp.prompts import get_template_color_section, get_template_step_section
+
 if TYPE_CHECKING:
     from manim_mcp.core.llm import BaseLLMClient
     from manim_mcp.core.rag import ChromaDBService
@@ -87,33 +89,11 @@ class Section:
 
     def _get_color_section_prompt(self) -> str:
         """Generate prompt for color definitions section."""
-        return f"""You are filling a code section in a Manim animation.
-
-CONTEXT (code before this section):
-```python
-{self.prefix}
-```
-
-SECTION HEADER:
-{self.header_comment}
-
-YOUR TASK:
-Generate ONLY the color definitions that will be used in this animation.
-Define colors as variables like: PRIMARY_COLOR = BLUE
-
-RULES:
-- Output ONLY Python code, no explanations
-- Define 2-4 color variables using Manim color constants (BLUE, RED, GREEN, YELLOW, etc.)
-- Use descriptive names like PRIMARY_COLOR, SECONDARY_COLOR, ACCENT_COLOR
-- Do NOT include any self.play(), self.wait(), or animation code
-- Do NOT include comments (the section header is already present)
-
-CONTEXT (code after this section):
-```python
-{self.suffix[:500]}
-```
-
-Generate the color definitions:"""
+        return get_template_color_section(
+            prefix=self.prefix,
+            header_comment=self.header_comment,
+            suffix=self.suffix[:500],
+        )
 
     def _get_step_section_prompt(self, rag_examples: list[dict] | None = None) -> str:
         """Generate prompt for a narration step section."""
@@ -124,39 +104,13 @@ Generate the color definitions:"""
                 code_snippet = ex.get("content", "")[:400]
                 rag_context += f"\nExample {i}:\n```python\n{code_snippet}\n```\n"
 
-        return f"""You are filling a code section in a Manim animation using Fill-in-the-Middle generation.
-
-CONTEXT (code before this section):
-```python
-{self.prefix[-800:]}
-```
-
-SECTION HEADER:
-{self.header_comment}
-
-NARRATION TO VISUALIZE:
-"{self.narration}"
-
-YOUR TASK:
-Generate ONLY the Manim code to visualize this narration step.
-The code will be inserted between the section header and the self.wait(2) call.
-{rag_context}
-RULES:
-- Output ONLY Python code, no explanations or markdown
-- Use self.play() for animations
-- Create or modify Mobjects as needed for this step
-- You can reference colors like PRIMARY_COLOR, SECONDARY_COLOR defined earlier
-- Do NOT add self.wait() - it's already in the template
-- Do NOT include the section header comment - it's already present
-- Keep the code focused on this single narration step
-- Use variables from previous steps if they're in the prefix context
-
-CONTEXT (code after this section):
-```python
-{self.suffix[:300]}
-```
-
-Generate the code for this step:"""
+        return get_template_step_section(
+            prefix=self.prefix[-800:],
+            header_comment=self.header_comment,
+            narration=self.narration,
+            rag_context=rag_context,
+            suffix=self.suffix[:300],
+        )
 
 
 @dataclass

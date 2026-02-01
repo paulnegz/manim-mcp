@@ -172,20 +172,38 @@ def get_schema_generator_system() -> str:
     return load_prompt("schema_generator_system")
 
 
-def get_template_color_section(prefix: str, header_comment: str) -> str:
+def get_schema_generator_narration(script_text: str, step_count: int) -> str:
+    """Get the schema generator narration addition prompt."""
+    return load_prompt_with_vars(
+        "schema_generator_narration",
+        script_text=script_text,
+        step_count=str(step_count),
+    )
+
+
+def get_template_color_section(prefix: str, header_comment: str, suffix: str) -> str:
     """Get the template color section FIM prompt."""
     return load_prompt_with_vars(
         "template_color_section",
         prefix=prefix,
         header_comment=header_comment,
+        suffix=suffix,
     )
 
 
-def get_template_step_section(prefix: str, header_comment: str, narration: str) -> str:
+def get_template_step_section(
+    prefix: str,
+    header_comment: str,
+    narration: str,
+    rag_context: str = "",
+    suffix: str = "",
+) -> str:
     """Get the template step section FIM prompt."""
     return load_prompt_with_vars(
         "template_step_section",
         prefix=prefix,
         header_comment=header_comment,
         narration=narration,
+        rag_context=rag_context,
+        suffix=suffix,
     )

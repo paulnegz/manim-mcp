@@ -13,28 +13,21 @@ NARRATION TO VISUALIZE:
 
 YOUR TASK:
 Generate ONLY the Manim code to visualize this narration step.
-
+The code will be inserted between the section header and the self.wait(2) call.
+{rag_context}
 RULES:
-1. Create objects needed for this step
-2. Use self.play() for animations
-3. Use self.wait() for pauses (typically 0.5-2 seconds)
-4. Reference colors defined in the # --- COLORS --- section
-5. Position objects explicitly (.move_to(), .next_to(), .shift())
-6. Add comments describing what's happening
-7. Keep code clean and readable
-8. Match the narration content exactly
+- Output ONLY Python code, no explanations or markdown
+- Use self.play() for animations
+- Create or modify Mobjects as needed for this step
+- You can reference colors like PRIMARY_COLOR, SECONDARY_COLOR defined earlier
+- Do NOT add self.wait() - it's already in the template
+- Do NOT include the section header comment - it's already present
+- Keep the code focused on this single narration step
+- Use variables from previous steps if they're in the prefix context
 
-AVAILABLE ANIMATIONS:
-- Create, Write, FadeIn, FadeOut
-- Transform, ReplacementTransform
-- GrowArrow, ShowCreation
-- Indicate, Flash, Circumscribe
-- MoveToTarget, ApplyMethod
-
-DO NOT:
-- Define new colors (use existing ones)
-- Create the class definition
-- Include imports
-- Add markdown fences
+CONTEXT (code after this section):
+```python
+{suffix}
+```
 
 Generate the code for this step:
