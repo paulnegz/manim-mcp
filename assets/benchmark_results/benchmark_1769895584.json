@@ -1,0 +1,50 @@
+[
+  {
+    "provider": "deepseek",
+    "category": "simple",
+    "prompt": "Create a blue circle that moves from left to right",
+    "success": false,
+    "generation_time_ms": 1143.6829566955566,
+    "retry_count": 0,
+    "code_length": 0,
+    "lines_of_code": 0,
+    "ast_complexity": 0,
+    "syntax_valid": false,
+    "manim_valid": false,
+    "render_success": false,
+    "rag_context_used": false,
+    "render_id": null
+  },
+  {
+    "provider": "deepseek",
+    "category": "medium",
+    "prompt": "Show the Pythagorean theorem with a right triangle and squares on each side",
+    "success": false,
+    "generation_time_ms": 1123.1324672698975,
+    "retry_count": 0,
+    "code_length": 0,
+    "lines_of_code": 0,
+    "ast_complexity": 0,
+    "syntax_valid": false,
+    "manim_valid": false,
+    "render_success": false,
+    "rag_context_used": false,
+    "render_id": null
+  },
+  {
+    "provider": "deepseek",
+    "category": "complex",
+    "prompt": "Animate the derivative of x^2 showing the limit definition",
+    "success": false,
+    "generation_time_ms": 1080.2059173583984,
+    "retry_count": 0,
+    "code_length": 0,
+    "lines_of_code": 0,
+    "ast_complexity": 0,
+    "syntax_valid": false,
+    "manim_valid": false,
+    "render_success": false,
+    "rag_context_used": false,
+    "render_id": null
+  }
+]
