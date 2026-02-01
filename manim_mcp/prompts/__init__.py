@@ -105,3 +105,87 @@ def get_code_reviewer_system() -> str:
 def get_code_generator_system(latex_available: bool = True) -> str:
     """Get the code generator agent system prompt."""
     return load_prompt("code_generator")
+
+
+# ── TTS / Narration prompts ──────────────────────────────────────────────
+
+def get_tts_narration_script(prompt: str) -> str:
+    """Get the narration script generation prompt."""
+    return load_prompt_with_vars("tts_narration_script", prompt=prompt)
+
+
+def get_tts_narration_from_code(
+    code: str,
+    prompt: str,
+    target_duration: float,
+    target_word_count: int,
+    sentence_count: int,
+) -> str:
+    """Get the narration-from-code generation prompt."""
+    return load_prompt_with_vars(
+        "tts_narration_from_code",
+        code=code,
+        prompt=prompt,
+        target_duration=f"{target_duration:.1f}",
+        target_word_count=str(target_word_count),
+        sentence_count=str(sentence_count),
+    )
+
+
+def get_tts_narration_fallback(
+    prompt: str,
+    target_duration: float,
+    target_word_count: int,
+    sentence_count: int,
+) -> str:
+    """Get the fallback narration generation prompt."""
+    return load_prompt_with_vars(
+        "tts_narration_fallback",
+        prompt=prompt,
+        target_duration=f"{target_duration:.1f}",
+        target_word_count=str(target_word_count),
+        sentence_count=str(sentence_count),
+    )
+
+
+# ── Self-critique prompts ────────────────────────────────────────────────
+
+def get_self_critique_system() -> str:
+    """Get the self-critique system prompt."""
+    return load_prompt("self_critique_system")
+
+
+def get_self_critique_fix() -> str:
+    """Get the self-critique fix system prompt."""
+    return load_prompt("self_critique_fix")
+
+
+def get_self_critique_verify() -> str:
+    """Get the self-critique verify system prompt."""
+    return load_prompt("self_critique_verify")
+
+
+# ── Schema/Template generation prompts ───────────────────────────────────
+
+def get_schema_generator_system() -> str:
+    """Get the schema generator system prompt."""
+    return load_prompt("schema_generator_system")
+
+
+def get_template_color_section(prefix: str, header_comment: str) -> str:
+    """Get the template color section FIM prompt."""
+    return load_prompt_with_vars(
+        "template_color_section",
+        prefix=prefix,
+        header_comment=header_comment,
+    )
+
+
+def get_template_step_section(prefix: str, header_comment: str, narration: str) -> str:
+    """Get the template step section FIM prompt."""
+    return load_prompt_with_vars(
+        "template_step_section",
+        prefix=prefix,
+        header_comment=header_comment,
+        narration=narration,
+    )

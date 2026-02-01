@@ -17,6 +17,12 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from manim_mcp.prompts import (
+    get_self_critique_system,
+    get_self_critique_fix,
+    get_self_critique_verify,
+)
+
 if TYPE_CHECKING:
     from manim_mcp.core.llm import BaseLLMClient
     from manim_mcp.core.rag import ChromaDBService
@@ -63,91 +69,7 @@ class CritiqueResult:
         }
 
 
-# ── Critique Prompts ───────────────────────────────────────────────────
-
-
-CRITIQUE_SYSTEM_PROMPT = """You are a Manim code reviewer specializing in 3blue1brown style animations.
-Your task is to critique the given Manim code for common issues and style violations.
-
-Focus on these specific issues:
-
-1. VARIABLE SHADOWING
-   - Variables that are assigned to themselves (e.g., `BLUE_A = BLUE_A`)
-   - Redefining built-in Manim constants without purpose
-   - Local variables shadowing class attributes
-
-2. UNUSED VARIABLES
-   - Variables defined but never used in animations
-   - Objects created but never added to scene or animated
-   - Intermediate calculations whose results are discarded
-
-3. MISSING NARRATION SYNC COMMENTS
-   - For narrated animations, there should be comments indicating sync points
-   - Format like: # [NARRATION: "text here"]
-   - Missing wait() calls between narration segments
-
-4. 3BLUE1BROWN STYLE COMPLIANCE
-   - Uses smooth animations (FadeIn, Transform, Write) not instant Add
-   - Proper use of wait() for pacing
-   - Colors should be Manim constants (BLUE, YELLOW) not hex codes
-   - Mathematical notation uses Tex/MathTex properly
-   - Progressive reveals of complex concepts
-
-5. DEAD CODE / REDUNDANT DEFINITIONS
-   - Unreachable code after return statements
-   - Duplicate imports or definitions
-   - Commented-out code blocks
-   - Variables overwritten before use
-
-6. PROPER VGROUP USAGE
-   - Multiple related objects should be grouped in VGroup
-   - VGroups should be used for coordinated transformations
-   - Avoid animating many individual objects when VGroup would be cleaner
-
-Respond in JSON format:
-{
-    "issues": ["issue 1 description", "issue 2 description", ...],
-    "severity": "none" | "minor" | "major" | "critical",
-    "suggestions": ["suggestion 1", "suggestion 2", ...],
-    "code_quality_score": 0-100
-}
-
-Severity guidelines:
-- "none": No issues found, code is clean
-- "minor": Style issues that don't affect functionality
-- "major": Issues that may cause unexpected behavior or are clearly wrong
-- "critical": Issues that will definitely cause errors or security concerns
-"""
-
-
-FIX_SYSTEM_PROMPT = """You are a Manim code fixer. Your task is to fix the identified issues in the code.
-
-Apply fixes for all reported issues while:
-1. Preserving the overall structure and intent of the animation
-2. Maintaining 3blue1brown style patterns
-3. Ensuring all animations are smooth and well-paced
-4. Keeping narration sync points if present
-
-Output ONLY the fixed Python code, no explanations or markdown fences.
-"""
-
-
-VERIFY_SYSTEM_PROMPT = """You are a Manim code verifier. Your task is to verify that the previous fixes were applied correctly.
-
-Check that:
-1. All reported issues have been addressed
-2. No new issues were introduced by the fixes
-3. The code still produces the intended animation
-4. 3blue1brown style is maintained
-
-Respond in JSON format:
-{
-    "all_fixed": true | false,
-    "remaining_issues": ["issue 1", ...],
-    "new_issues": ["issue 1", ...],
-    "verification_passed": true | false
-}
-"""
+# Prompts are loaded from manim_mcp/prompts/*.md files via the prompt loader
 
 
 # ── Self-Critique Generator ────────────────────────────────────────────
@@ -291,7 +213,7 @@ class SelfCritiqueGenerator:
 
         # Get LLM critique
         try:
-            result = await self._llm_call_json(critique_prompt, CRITIQUE_SYSTEM_PROMPT)
+            result = await self._llm_call_json(critique_prompt, get_self_critique_system())
 
             issues = result.get("issues", [])
             severity = result.get("severity", "none")
@@ -349,7 +271,7 @@ class SelfCritiqueGenerator:
         fix_prompt = self._build_fix_prompt(code, critique)
 
         try:
-            fixed_code = await self._llm_call(fix_prompt, FIX_SYSTEM_PROMPT)
+            fixed_code = await self._llm_call(fix_prompt, get_self_critique_fix())
             fixed_code = self._strip_fences(fixed_code)
 
             # Validate the fix didn't break the code structure
@@ -432,7 +354,7 @@ CODE:
 Check each issue and report on the verification status."""
 
         try:
-            result = await self._llm_call_json(verify_prompt, VERIFY_SYSTEM_PROMPT)
+            result = await self._llm_call_json(verify_prompt, get_self_critique_verify())
             return result
         except Exception as e:
             logger.warning("[SELF-CRITIQUE] Verification failed: %s", e)

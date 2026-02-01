@@ -11,6 +11,12 @@ from typing import TYPE_CHECKING
 
 from pydub import AudioSegment
 
+from manim_mcp.prompts import (
+    get_tts_narration_script,
+    get_tts_narration_from_code,
+    get_tts_narration_fallback,
+)
+
 if TYPE_CHECKING:
     from google import genai
     from manim_mcp.config import ManimMCPConfig
@@ -38,24 +44,7 @@ class GeminiTTSService:
         """
         response = await self.client.aio.models.generate_content(
             model=self.narration_model,
-            contents=f"""Create an educational narration script (6-10 sentences) for a math animation video about:
-
-{prompt}
-
-The narration should:
-1. Start with an introduction to the topic
-2. Describe each visual step that should appear (e.g., "First, let's draw a coordinate plane")
-3. Explain the mathematical concepts as they would appear visually
-4. End with a summary or key takeaway
-
-Rules:
-- Write as if narrating a 3Blue1Brown-style video
-- Each sentence describes ONE visual step or concept
-- Be specific about what should appear (axes, vectors, equations, etc.)
-- Keep sentences under 25 words each
-- Use educational, engaging language
-
-Return ONLY the narration text, one sentence per line. Each sentence will correspond to a scene in the animation.""",
+            contents=get_tts_narration_script(prompt=prompt),
         )
         text = response.text.strip()
         # Split into sentences, filter empty
@@ -88,56 +77,24 @@ Return ONLY the narration text, one sentence per line. Each sentence will corres
             # Generate narration from code structure and comments
             response = await self.client.aio.models.generate_content(
                 model=self.narration_model,
-                contents=f"""You are narrating a 3Blue1Brown-style math animation video.
-
-ANIMATION CODE:
-```python
-{code}
-```
-
-ORIGINAL PROMPT: {prompt}
-
-YOUR TASK:
-Read the code above carefully. Based on:
-1. The comments in the code (they describe what's happening)
-2. The animation calls (self.play, ShowCreation, Transform, etc.)
-3. The objects being created and manipulated
-
-Generate a narration script that explains what the viewer SEES on screen.
-
-TIMING CONSTRAINT:
-- Video duration: {target_duration:.1f} seconds
-- Target: ~{target_word_count} words ({sentence_count} sentences)
-- Each sentence matches one visual moment in the animation
-
-RULES:
-- Follow the ORDER of animations in the code
-- Use comments as hints but write natural spoken sentences
-- Describe what appears, moves, transforms on screen
-- Educational, engaging 3Blue1Brown style
-- Don't mention code, variables, or technical implementation
-
-Return ONLY the narration, one sentence per line.""",
+                contents=get_tts_narration_from_code(
+                    code=code,
+                    prompt=prompt,
+                    target_duration=target_duration,
+                    target_word_count=target_word_count,
+                    sentence_count=sentence_count,
+                ),
             )
         else:
             # Fallback: generate from prompt only
             response = await self.client.aio.models.generate_content(
                 model=self.narration_model,
-                contents=f"""Create an educational narration script for a math animation video about:
-
-{prompt}
-
-TIMING CONSTRAINT:
-- Video duration: {target_duration:.1f} seconds
-- Target: ~{target_word_count} words ({sentence_count} sentences)
-
-Rules:
-- Write as if narrating a 3Blue1Brown-style video
-- Each sentence describes what's happening visually
-- Natural speaking pace
-- Educational but concise
-
-Return ONLY the narration text, one sentence per line.""",
+                contents=get_tts_narration_fallback(
+                    prompt=prompt,
+                    target_duration=target_duration,
+                    target_word_count=target_word_count,
+                    sentence_count=sentence_count,
+                ),
             )
 
         text = response.text.strip()
