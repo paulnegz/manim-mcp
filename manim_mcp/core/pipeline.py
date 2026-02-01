@@ -203,6 +203,24 @@ class AnimationPipeline:
                             logger.info("Uploaded slowed video to S3: %s", s3_key)
                         except Exception as e:
                             logger.warning("Failed to upload slowed video: %s", e)
+            elif not has_audio and result.local_path and params.video_speed == 1.0:
+                # No audio, no speed change - still need mobile transcoding
+                await report("processing_video", 85)
+                mobile_path = await self._transcode_for_mobile(result.local_path)
+                if mobile_path != result.local_path:
+                    result.local_path = mobile_path
+                    # Re-upload mobile-transcoded video to S3
+                    if self.storage.available:
+                        filename = os.path.basename(mobile_path)
+                        s3_key = f"{self.config.s3_prefix}{render_id}/{filename}"
+                        try:
+                            result.s3_url = await self.storage.upload_file(mobile_path, s3_key)
+                            result.s3_object_key = s3_key
+                            result.url = await self.storage.generate_presigned_url(s3_key)
+                            result.file_size_bytes = os.path.getsize(mobile_path)
+                            logger.info("Uploaded mobile-transcoded video to S3: %s", s3_key)
+                        except Exception as e:
+                            logger.warning("Failed to upload mobile-transcoded video: %s", e)
 
             await report("finalizing", 95)
 
@@ -379,6 +397,24 @@ class AnimationPipeline:
                             logger.info("Uploaded slowed video to S3: %s", s3_key)
                         except Exception as e:
                             logger.warning("Failed to upload slowed video: %s", e)
+            elif not has_audio and result.local_path and params.video_speed == 1.0:
+                # No audio, no speed change - still need mobile transcoding
+                await report("processing_video", 85)
+                mobile_path = await self._transcode_for_mobile(result.local_path)
+                if mobile_path != result.local_path:
+                    result.local_path = mobile_path
+                    # Re-upload mobile-transcoded video to S3
+                    if self.storage.available:
+                        filename = os.path.basename(mobile_path)
+                        s3_key = f"{self.config.s3_prefix}{render_id}/{filename}"
+                        try:
+                            result.s3_url = await self.storage.upload_file(mobile_path, s3_key)
+                            result.s3_object_key = s3_key
+                            result.url = await self.storage.generate_presigned_url(s3_key)
+                            result.file_size_bytes = os.path.getsize(mobile_path)
+                            logger.info("Uploaded mobile-transcoded video to S3: %s", s3_key)
+                        except Exception as e:
+                            logger.warning("Failed to upload mobile-transcoded video: %s", e)
 
             await report("finalizing", 95)
 
@@ -464,6 +500,25 @@ class AnimationPipeline:
                 new_id, edited_code, scene_name, params, original.original_prompt or instructions
             )
             await report("uploading", 90)
+
+            # Transcode for mobile compatibility
+            if result.local_path:
+                await report("processing_video", 92)
+                mobile_path = await self._transcode_for_mobile(result.local_path)
+                if mobile_path != result.local_path:
+                    result.local_path = mobile_path
+                    # Re-upload mobile-transcoded video to S3
+                    if self.storage.available:
+                        filename = os.path.basename(mobile_path)
+                        s3_key = f"{self.config.s3_prefix}{new_id}/{filename}"
+                        try:
+                            result.s3_url = await self.storage.upload_file(mobile_path, s3_key)
+                            result.s3_object_key = s3_key
+                            result.url = await self.storage.generate_presigned_url(s3_key)
+                            result.file_size_bytes = os.path.getsize(mobile_path)
+                            logger.info("Uploaded mobile-transcoded video to S3: %s", s3_key)
+                        except Exception as e:
+                            logger.warning("Failed to upload mobile-transcoded video: %s", e)
 
             await report("finalizing", 95)
 
@@ -1006,12 +1061,37 @@ The timing and visuals must sync with this script."""
         import tempfile
         thumb_path = os.path.join(tempfile.gettempdir(), f"{render_id}_thumb.png")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-sseof", "-1", "-i", video_path,
-                "-vframes", "1", "-q:v", "2", thumb_path,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
+            # Get video duration using ffprobe
+            duration = 0.0
+            if shutil.which("ffprobe"):
+                probe_proc = await asyncio.create_subprocess_exec(
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", video_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                stdout, _ = await asyncio.wait_for(probe_proc.communicate(), timeout=10)
+                try:
+                    duration = float(stdout.decode().strip())
+                except (ValueError, AttributeError):
+                    duration = 0.0
+
+            # Extract middle frame (or fallback to 1s from end if duration unknown)
+            if duration > 0:
+                middle_time = str(duration / 2)
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-ss", middle_time, "-i", video_path,
+                    "-vframes", "1", "-q:v", "2", thumb_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-sseof", "-1", "-i", video_path,
+                    "-vframes", "1", "-q:v", "2", thumb_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
             await asyncio.wait_for(proc.communicate(), timeout=30)
 
             if os.path.exists(thumb_path):
@@ -1351,6 +1431,9 @@ The timing and visuals must sync with this script."""
                 "-map", "[v]",
                 "-map", "1:a",
                 "-c:v", "libx264", "-preset", "fast",
+                "-profile:v", "main", "-level", "3.1",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
                 "-c:a", "aac",
                 "-shortest",
                 output_path,
@@ -1368,6 +1451,9 @@ The timing and visuals must sync with this script."""
                 "-map", "[v]",
                 "-map", "[a]",
                 "-c:v", "libx264", "-preset", "fast",
+                "-profile:v", "main", "-level", "3.1",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
                 "-c:a", "aac",
                 output_path,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -1380,7 +1466,7 @@ The timing and visuals must sync with this script."""
             logger.error("ffmpeg failed: %s", stderr.decode() if stderr else "unknown error")
             return video_path  # Return original on failure
 
-        logger.info("Audio mixed successfully: %s", output_path)
+        logger.info("Audio mixed successfully (mobile-compatible): %s", output_path)
         return output_path
 
     async def _slow_down_video(self, video_path: str, video_speed: float = 0.60) -> str:
@@ -1411,12 +1497,16 @@ The timing and visuals must sync with this script."""
         )
 
         # Apply speed filter: setpts=PTS/speed slows down the video
+        # Include mobile-compatible encoding settings
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y",
             "-i", video_path,
             "-filter:v", f"setpts=PTS/{video_speed}",
             "-an",  # No audio
             "-c:v", "libx264", "-preset", "fast",
+            "-profile:v", "main", "-level", "3.1",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
             output_path,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
@@ -1428,7 +1518,55 @@ The timing and visuals must sync with this script."""
             logger.error("ffmpeg slowdown failed: %s", stderr.decode() if stderr else "unknown error")
             return video_path  # Return original on failure
 
-        logger.info("Video slowed successfully: %s", output_path)
+        logger.info("Video slowed successfully (mobile-compatible): %s", output_path)
+        return output_path
+
+    async def _transcode_for_mobile(self, video_path: str) -> str:
+        """Transcode video to mobile-compatible H.264 format.
+
+        Ensures the video uses:
+        - H.264 Main profile (iOS Safari compatible)
+        - Level 3.1 (good mobile compatibility)
+        - yuv420p pixel format (required for mobile)
+        - faststart flag (moov atom at beginning for streaming)
+
+        Args:
+            video_path: Path to the rendered video
+
+        Returns:
+            Path to the mobile-compatible video
+        """
+        if not shutil.which("ffmpeg"):
+            logger.warning("ffmpeg not found, cannot transcode for mobile")
+            return video_path
+
+        output_path = video_path.replace(".mp4", "_mobile.mp4")
+        if output_path == video_path:
+            base, ext = os.path.splitext(video_path)
+            output_path = f"{base}_mobile{ext}"
+
+        logger.info("Transcoding for mobile compatibility: %s -> %s", video_path, output_path)
+
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-c:v", "libx264", "-preset", "fast",
+            "-profile:v", "main", "-level", "3.1",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-c:a", "aac",  # Also ensure audio is AAC if present
+            output_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        _, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            logger.error("Mobile transcode failed: %s", stderr.decode() if stderr else "unknown error")
+            return video_path  # Return original on failure
+
+        logger.info("Video transcoded for mobile: %s", output_path)
         return output_path
 
     async def _get_media_duration(self, path: str) -> float:
