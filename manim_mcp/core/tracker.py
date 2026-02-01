@@ -41,9 +41,7 @@ CREATE TABLE IF NOT EXISTS renders (
 )
 """
 
-_MIGRATION_ADD_THUMBNAIL_KEY = """
-ALTER TABLE renders ADD COLUMN thumbnail_s3_key TEXT
-"""
+_MIGRATION_ADD_THUMBNAIL_KEY = "ALTER TABLE renders ADD COLUMN thumbnail_s3_key TEXT"
 
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_renders_status ON renders (status)",
@@ -204,7 +202,7 @@ class RenderTracker:
 
 
 def _row_to_metadata(row) -> RenderMetadata:
-    # Handle both old DBs (without thumbnail_s3_key) and new ones
+    # Handle old DBs without thumbnail_s3_key
     thumbnail_s3_key = None
     try:
         thumbnail_s3_key = row["thumbnail_s3_key"]

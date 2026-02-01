@@ -32,19 +32,15 @@ def register_manage_tools(mcp: FastMCP) -> None:
                 offset=max(offset, 0),
                 status=status_enum,
             )
-
-            # Regenerate fresh presigned URLs for each render
+            # Regenerate fresh presigned URLs
             results = []
             for r in renders:
                 render_dict = r.model_dump()
                 if r.s3_object_key:
-                    presigned = await app.storage.generate_presigned_url(r.s3_object_key)
-                    render_dict["presigned_url"] = presigned
+                    render_dict["presigned_url"] = await app.storage.generate_presigned_url(r.s3_object_key)
                 if r.thumbnail_s3_key:
-                    thumb_url = await app.storage.generate_presigned_url(r.thumbnail_s3_key)
-                    render_dict["thumbnail_url"] = thumb_url
+                    render_dict["thumbnail_url"] = await app.storage.generate_presigned_url(r.thumbnail_s3_key)
                 results.append(render_dict)
-
             return {"renders": results, "count": len(results)}
         except ManimMCPError as e:
             return {"error": True, "message": str(e)}
@@ -65,19 +61,15 @@ def register_manage_tools(mcp: FastMCP) -> None:
 
             # Regenerate fresh presigned URL for video
             if metadata.s3_object_key:
-                presigned = await app.storage.generate_presigned_url(metadata.s3_object_key)
-                result["presigned_url"] = presigned
+                result["presigned_url"] = await app.storage.generate_presigned_url(metadata.s3_object_key)
 
             # Regenerate fresh presigned URL for thumbnail
             if metadata.thumbnail_s3_key:
-                thumb_url = await app.storage.generate_presigned_url(metadata.thumbnail_s3_key)
-                result["thumbnail_url"] = thumb_url
+                result["thumbnail_url"] = await app.storage.generate_presigned_url(metadata.thumbnail_s3_key)
             elif metadata.s3_object_key:
-                # Fallback: try standard thumbnail path if key not stored
                 thumb_key = metadata.s3_object_key.rsplit("/", 1)[0] + "/thumbnail.png"
                 if await app.storage.object_exists(thumb_key):
-                    thumb_url = await app.storage.generate_presigned_url(thumb_key)
-                    result["thumbnail_url"] = thumb_url
+                    result["thumbnail_url"] = await app.storage.generate_presigned_url(thumb_key)
 
             return result
         except ManimMCPError as e:
