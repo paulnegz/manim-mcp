@@ -25,7 +25,8 @@ class GeminiTTSService:
         from google import genai as genai_module
 
         self.client = genai_module.Client(api_key=config.gemini_api_key)
-        self.model = config.tts_model
+        self.model = config.tts_model  # For TTS audio generation
+        self.narration_model = config.gemini_model  # For narration script generation
         self.voice = config.tts_voice
         self.pause_ms = config.tts_pause_ms
         self.max_concurrent = config.tts_max_concurrent
@@ -36,7 +37,7 @@ class GeminiTTSService:
         This script will be used to guide code generation - code should match this narration.
         """
         response = await self.client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=self.narration_model,
             contents=f"""Create an educational narration script (6-10 sentences) for a math animation video about:
 
 {prompt}
@@ -86,7 +87,7 @@ Return ONLY the narration text, one sentence per line. Each sentence will corres
         if code:
             # Generate narration from code structure and comments
             response = await self.client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model=self.narration_model,
                 contents=f"""You are narrating a 3Blue1Brown-style math animation video.
 
 ANIMATION CODE:
@@ -121,7 +122,7 @@ Return ONLY the narration, one sentence per line.""",
         else:
             # Fallback: generate from prompt only
             response = await self.client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model=self.narration_model,
                 contents=f"""Create an educational narration script for a math animation video about:
 
 {prompt}
