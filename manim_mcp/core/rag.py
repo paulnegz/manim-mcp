@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from manim_mcp.core.embeddings import get_embedding_function_for_collection
+from manim_mcp.core.probe_search import get_probe_searcher, ProbeSearcher
 
 if TYPE_CHECKING:
     from manim_mcp.config import ManimMCPConfig
@@ -30,6 +31,7 @@ class ChromaDBService:
         self._errors_collection = None
         self._api_collection = None
         self._patterns_collection = None
+        self._probe_searcher: ProbeSearcher | None = None
 
     async def initialize(self) -> None:
         """Initialize ChromaDB connection with graceful degradation.
@@ -120,6 +122,13 @@ class ChromaDBService:
                 self._api_collection.count(),
                 self._patterns_collection.count(),
             )
+
+            # Initialize Probe searcher for AST-aware code search
+            self._probe_searcher = get_probe_searcher()
+            if self._probe_searcher.available:
+                logger.info("Probe searcher available for AST-aware code search")
+            else:
+                logger.debug("Probe searcher not available (probe CLI not installed or no paths configured)")
 
         except ImportError:
             logger.warning(
@@ -548,7 +557,7 @@ class ChromaDBService:
         n_results: int | None = None,
         prioritize_3b1b: bool = True,
     ) -> list[dict]:
-        """Search for similar Manim scenes.
+        """Search for similar Manim scenes using hybrid ChromaDB + Probe search.
 
         Args:
             query: Natural language description or code snippet
@@ -558,33 +567,138 @@ class ChromaDBService:
         Returns:
             List of results with content, metadata, and similarity score
         """
-        if not self.available or not self._scenes_collection:
-            return []
+        import asyncio
 
-        # Fetch more results so we can filter/re-rank
-        fetch_n = (n_results or self.config.rag_results_limit) * 3 if prioritize_3b1b else (n_results or self.config.rag_results_limit)
+        target_n = n_results or self.config.rag_results_limit
+        chromadb_results = []
+        probe_results = []
 
-        try:
-            results = self._scenes_collection.query(
-                query_texts=[query],
-                n_results=fetch_n,
-                include=["documents", "metadatas", "distances"],
+        # Run ChromaDB and Probe searches in parallel
+        async def chromadb_search():
+            if not self.available or not self._scenes_collection:
+                return []
+            fetch_n = target_n * 3 if prioritize_3b1b else target_n
+            try:
+                results = self._scenes_collection.query(
+                    query_texts=[query],
+                    n_results=fetch_n,
+                    include=["documents", "metadatas", "distances"],
+                )
+                return self._format_results(results)
+            except Exception as e:
+                logger.warning("ChromaDB scene search failed: %s", e)
+                return []
+
+        async def probe_search():
+            if not self._probe_searcher or not self._probe_searcher.available:
+                return []
+            try:
+                result = await self._probe_searcher.search_scenes(
+                    query=query,
+                    max_tokens=4000,
+                    max_results=target_n,
+                )
+                return result.to_rag_format()
+            except Exception as e:
+                logger.warning("Probe scene search failed: %s", e)
+                return []
+
+        # Execute both searches concurrently
+        chromadb_results, probe_results = await asyncio.gather(
+            chromadb_search(),
+            probe_search(),
+        )
+
+        # Merge results: Probe results are AST-aware complete code blocks
+        merged = self._merge_search_results(
+            chromadb_results,
+            probe_results,
+            probe_boost=0.15,  # Boost Probe results for complete code blocks
+        )
+
+        if prioritize_3b1b and merged:
+            merged = self._prioritize_3b1b_results(
+                merged,
+                target_n,
+                query=query,
             )
 
-            formatted = self._format_results(results)
+        return merged[:target_n]
 
-            if prioritize_3b1b and formatted:
-                formatted = self._prioritize_3b1b_results(
-                    formatted,
-                    n_results or self.config.rag_results_limit,
-                    query=query  # Pass query for method-based re-ranking
-                )
+    def _merge_search_results(
+        self,
+        chromadb_results: list[dict],
+        probe_results: list[dict],
+        probe_boost: float = 0.15,
+    ) -> list[dict]:
+        """Merge ChromaDB and Probe search results with deduplication.
 
-            return formatted
+        Strategy:
+        - Use content hash for deduplication
+        - Probe results get a score boost (complete AST-aware blocks)
+        - Items found in both get an additional overlap boost
+        - Sort by final score
 
-        except Exception as e:
-            logger.warning("Scene search failed: %s", e)
-            return []
+        Args:
+            chromadb_results: Results from ChromaDB vector search
+            probe_results: Results from Probe AST-aware search
+            probe_boost: Score boost for Probe results (0.0-1.0)
+
+        Returns:
+            Merged and deduplicated results sorted by score
+        """
+        results_map: dict[str, dict] = {}  # content_hash -> result
+
+        # Add ChromaDB results
+        for r in chromadb_results:
+            content = r.get("content", "")
+            content_hash = self._hash_content(content[:500])  # Hash prefix for dedup
+            if content_hash not in results_map:
+                results_map[content_hash] = {
+                    **r,
+                    "source": "chromadb",
+                    "_final_score": r.get("similarity_score", 0.5),
+                }
+
+        # Add/merge Probe results
+        for r in probe_results:
+            content = r.get("content", "")
+            content_hash = self._hash_content(content[:500])
+
+            if content_hash in results_map:
+                # Found in both - boost the existing result
+                existing = results_map[content_hash]
+                existing["_final_score"] = min(1.0, existing["_final_score"] + 0.1)
+                existing["source"] = "chromadb+probe"
+                logger.debug("[RAG] Overlap boost for result found in both sources")
+            else:
+                # New from Probe - add with boost
+                probe_score = r.get("similarity_score", 0.5) + probe_boost
+                results_map[content_hash] = {
+                    **r,
+                    "source": "probe",
+                    "_final_score": min(1.0, probe_score),
+                }
+
+        # Sort by final score and clean up
+        sorted_results = sorted(
+            results_map.values(),
+            key=lambda x: x.get("_final_score", 0),
+            reverse=True,
+        )
+
+        # Remove internal fields before returning
+        for r in sorted_results:
+            r["similarity_score"] = r.pop("_final_score", r.get("similarity_score", 0))
+            r.pop("source", None)
+
+        if probe_results:
+            logger.info(
+                "[RAG] Merged %d ChromaDB + %d Probe results -> %d unique",
+                len(chromadb_results), len(probe_results), len(sorted_results)
+            )
+
+        return sorted_results
 
     def _prioritize_3b1b_results(self, results: list[dict], n_results: int, query: str = "") -> list[dict]:
         """Re-rank results to prioritize 3b1b original code and method-containing results.
