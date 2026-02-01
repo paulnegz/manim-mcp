@@ -56,7 +56,7 @@ Copy `.env.example` to `.env` and fill in your values:
 ```bash
 # LLM Provider
 MANIM_MCP_GEMINI_API_KEY=your-gemini-api-key
-MANIM_MCP_GEMINI_MODEL=gemini-2.5-flash-preview-05-20  # default
+MANIM_MCP_GEMINI_MODEL=gemini-3-flash-preview  # default
 
 # Alternative: Claude
 # MANIM_MCP_LLM_PROVIDER=claude
