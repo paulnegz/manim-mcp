@@ -27,7 +27,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
-    { name = "Paul Negedu", email = "paul@negedu.com" }
+    { name = "Paul Negedu", email = "support@trylink.tech" }
 ]
 keywords = ["manim", "animation", "mcp", "llm", "video", "3blue1brown", "math"]
 classifiers = [
