@@ -29,11 +29,10 @@ Works as a **CLI tool**, an **LLM-powered agent**, or an **MCP server** for inte
 - **Multi-agent pipeline** - Concept analysis, scene planning, code generation, and code review
 - **Self-learning** - Stores error patterns and fixes for continuous improvement
 - **Multi-provider LLM** - Supports Google Gemini, Anthropic Claude, and DeepSeek
-- **Audio narration** - Narration-first pipeline ensures audio-video sync:
-  - Narration script generated first
-  - Code follows the script sequence
-  - TTS runs in parallel with code generation
-  - Each sentence TTS runs in parallel
+- **Audio narration** - Parallel audio generation with automatic sync:
+  - Video code generated first (no narration constraint)
+  - TTS runs in parallel with video rendering
+  - Audio automatically paced to match video duration
 - **Parameter validation** - API signatures prevent invalid method calls
 
 ## Quick Start
@@ -89,9 +88,19 @@ MANIM_MCP_PROBE_PATHS=/path/to/3b1b-videos:/path/to/manim-examples
 ### Generate an animation
 
 ```bash
-manim-mcp generate "Animate a matrix transformation showing rotation and scaling"
-manim-mcp gen "Visualize the central limit theorem" --quality high --format mp4
+# Simple mode (default) - direct LLM generation
+manim-mcp gen "Transform a blue circle into a red square"
+
+# Advanced mode - multi-agent pipeline with RAG
+manim-mcp gen "Visualize the central limit theorem" --mode advanced
+
+# With quality and format options
+manim-mcp gen "Animate eigenvectors" --quality high --format mp4
 ```
+
+**Generation modes:**
+- `--mode simple` (default): Direct LLM code generation, faster
+- `--mode advanced`: Multi-agent pipeline (ConceptAnalyzer → ScenePlanner → CodeGenerator → CodeReviewer) with RAG retrieval
 
 ### Generate with audio narration
 
@@ -100,10 +109,10 @@ manim-mcp gen "Introduction to linear algebra" --audio
 manim-mcp gen "Pythagorean theorem proof" --audio --voice Kore
 ```
 
-Audio uses a **narration-first pipeline** for perfect sync:
-1. Narration script is generated first (6-10 sentences)
-2. Code generation follows the script (each `self.play()` = one sentence)
-3. TTS runs in parallel with code generation
+Audio uses a **parallel pipeline** with automatic sync:
+1. Manim code is generated first (video-driven)
+2. Video rendering and TTS generation run in parallel
+3. Audio is automatically paced to match video duration
 4. Audio is mixed into the final video
 
 ### Edit an existing animation
@@ -183,28 +192,26 @@ This starts:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      NARRATION-FIRST PIPELINE (with audio)                   │
+│                      AUDIO PIPELINE (parallel with video)                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│   prompt ──► Generate Narration Script (6-10 sentences)                      │
+│   prompt ──► Code Generation (video-driven)                                  │
 │                           │                                                  │
 │              ┌────────────┴────────────┐                                     │
 │              │                         │  PARALLEL                           │
 │              ▼                         ▼                                     │
 │   ┌──────────────────┐      ┌──────────────────┐                            │
-│   │  Code Generation │      │  TTS Generation  │                            │
-│   │  (follows script)│      │  (per sentence)  │                            │
+│   │  Render Video    │      │  Generate Script │                            │
+│   │                  │      │  + TTS Audio     │                            │
 │   └────────┬─────────┘      └────────┬─────────┘                            │
-│            │                         │  PARALLEL                             │
-│            ▼                         ▼                                       │
-│      validated code            audio segments                                │
 │            │                         │                                       │
 │            ▼                         ▼                                       │
-│   ┌──────────────────┐      ┌──────────────────┐                            │
-│   │  Render Video    │      │  Stitch Audio    │                            │
-│   └────────┬─────────┘      └────────┬─────────┘                            │
+│       video.mp4              audio segments                                  │
 │            │                         │                                       │
 │            └────────────┬────────────┘                                       │
+│                         ▼                                                    │
+│              Pace audio to video duration                                    │
+│                         │                                                    │
 │                         ▼                                                    │
 │                  Mix Audio + Video ──► S3 upload ──► URL                     │
 │                                                                              │
