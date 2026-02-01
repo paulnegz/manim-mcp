@@ -21,10 +21,14 @@ Works as a **CLI tool**, an **LLM-powered agent**, or an **MCP server** for inte
   - 101 animation pattern templates (Riemann sums, transforms, physics, etc.)
   - 470 library documentation files
   - 16+ error patterns for common mistakes
+- **Probe integration** - Optional AST-aware semantic code search using [Probe](https://github.com/buger/probe):
+  - Tree-sitter based code parsing (understands Python structure)
+  - Hybrid BM25 + TF-IDF ranking for better keyword matching
+  - Complete code block extraction (no truncation)
 - **Multi-animation videos** - Each video uses 2+ animation patterns for professional quality
 - **Multi-agent pipeline** - Concept analysis, scene planning, code generation, and code review
 - **Self-learning** - Stores error patterns and fixes for continuous improvement
-- **Multi-provider LLM** - Supports Google Gemini and Anthropic Claude
+- **Multi-provider LLM** - Supports Google Gemini, Anthropic Claude, and DeepSeek
 - **Audio narration** - Narration-first pipeline ensures audio-video sync:
   - Narration script generated first
   - Code follows the script sequence
@@ -44,6 +48,7 @@ pip install -e ".[rag]"
 - [manimgl](https://github.com/3b1b/manim) installed: `pip install manimgl`
 - A [Google Gemini API key](https://ai.google.dev/) set as `MANIM_MCP_GEMINI_API_KEY`
 - Optional: ChromaDB (for RAG), ffmpeg (for audio mixing), LaTeX (for math text), S3/MinIO (for cloud storage)
+- Optional: [Probe](https://github.com/buger/probe) for AST-aware code search (install via `cargo install probe-search`)
 
 ### Environment Variables
 
@@ -59,6 +64,10 @@ MANIM_MCP_GEMINI_MODEL=gemini-2.5-flash-preview-05-20  # default
 # MANIM_MCP_CLAUDE_API_KEY=your-claude-api-key
 # MANIM_MCP_CLAUDE_MODEL=claude-sonnet-4-20250514
 
+# Alternative: DeepSeek
+# MANIM_MCP_LLM_PROVIDER=deepseek
+# MANIM_MCP_DEEPSEEK_API_KEY=your-deepseek-api-key
+
 # RAG (ChromaDB)
 MANIM_MCP_RAG_ENABLED=true
 MANIM_MCP_CHROMADB_HOST=localhost
@@ -69,6 +78,10 @@ MANIM_MCP_S3_ENDPOINT=localhost:9000
 MANIM_MCP_S3_ACCESS_KEY=minioadmin
 MANIM_MCP_S3_SECRET_KEY=minioadmin
 MANIM_MCP_S3_BUCKET=manim-renders
+
+# Probe Search (optional - for AST-aware code search)
+# Colon-separated paths to search for scene examples
+MANIM_MCP_PROBE_PATHS=/path/to/3b1b-videos:/path/to/manim-examples
 ```
 
 ## Usage
@@ -241,6 +254,11 @@ This starts:
 | **ParameterValidator** | Validates method parameters against API signatures |
 | **GeminiTTSService** | Parallel TTS with Gemini voices, generates narration script |
 | **ChromaDBService** | Vector similarity search across 5,300+ indexed documents |
+| **ProbeSearcher** | AST-aware semantic code search using Probe (tree-sitter + BM25) |
+| **Linter** | Pre-generation code validation using ruff |
+| **SelfCritique** | Multi-pass code generation with self-review |
+| **SchemaGenerator** | JSON schema-based structured scene generation |
+| **TemplateGenerator** | Template-first generation (fill-in-the-middle style) |
 | **CodeSandbox** | AST-based security validation (blocks dangerous code) |
 | **ManimRenderer** | Executes manimgl with xvfb for headless rendering |
 | **S3Storage** | Uploads to MinIO/S3 with presigned URLs |
@@ -295,6 +313,19 @@ The system performs best with mathematical and educational topics that have high
 ```bash
 pip install -e ".[dev,rag]"
 pytest
+```
+
+### Testing Scripts
+
+```bash
+# Test all LLM provider combinations (Gemini/Claude × Simple/Advanced × RAG On/Off)
+python scripts/test_providers.py
+python scripts/test_providers.py --no-audio  # Skip audio generation
+python scripts/test_providers.py --quick     # Only simple mode tests
+
+# Benchmark LLM providers (DeepSeek vs Gemini)
+python scripts/benchmark_providers.py
+python scripts/benchmark_providers.py --providers gemini,deepseek --categories simple,medium
 ```
 
 ## License
