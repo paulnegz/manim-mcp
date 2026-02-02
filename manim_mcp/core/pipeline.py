@@ -1111,7 +1111,14 @@ The timing and visuals must sync with this script."""
             logger.warning("Validation failed (attempt %d/%d): %s",
                            attempt, self.config.gemini_max_retries, result.errors)
             if attempt < self.config.gemini_max_retries:
-                # Enhance errors with specific context for syntax errors
+                # Try deterministic fix FIRST (no LLM needed for simple syntax errors)
+                deterministic_fix = self._try_deterministic_fix(code, result.errors)
+                if deterministic_fix:
+                    logger.info("[VALIDATION] Applied deterministic fix, re-validating")
+                    code = deterministic_fix
+                    continue  # Re-validate without counting as LLM retry
+
+                # Fall back to LLM fix
                 enhanced_errors = self._enhance_error_context(code, result.errors)
                 fixed_code = await self.llm.fix_code(code, enhanced_errors)
                 # Index error pattern for self-learning
@@ -1124,6 +1131,60 @@ The timing and visuals must sync with this script."""
                 )
 
         return code
+
+    def _try_deterministic_fix(self, code: str, errors: list[str]) -> str | None:
+        """Try to fix syntax errors deterministically using parso.
+
+        Uses parso's error-recovery parser to identify fixable issues:
+        - Unclosed brackets where the fix location is clear
+        - Unterminated strings
+
+        Returns:
+            Fixed code if successful, None if LLM needed
+        """
+        try:
+            import parso
+            # Parse with error recovery to get error positions
+            module = parso.parse(code, error_recovery=True)
+            parso_errors = list(parso.parse(code).errors)
+
+            if not parso_errors:
+                return None  # No errors parso can identify
+
+            lines = code.split('\n')
+            fixed = False
+
+            for err in parso_errors:
+                msg = err.message.lower()
+                line_num, col_num = err.start_pos  # (line, col) - line is 1-indexed
+
+                if 'was never closed' in msg or 'unclosed' in msg:
+                    # Determine bracket type from message
+                    close_char = None
+                    if '(' in msg or 'parenthesis' in msg:
+                        close_char = ')'
+                    elif '[' in msg or 'bracket' in msg:
+                        close_char = ']'
+                    elif '{' in msg or 'brace' in msg:
+                        close_char = '}'
+
+                    if close_char and 1 <= line_num <= len(lines):
+                        line = lines[line_num - 1]
+                        after_col = line[col_num:].strip() if col_num < len(line) else ''
+
+                        # Only fix if there's content after the bracket (single-line case)
+                        if after_col and not line.rstrip().endswith((':', '\\', ',', '(', '[', '{')):
+                            lines[line_num - 1] = line.rstrip() + close_char
+                            logger.info("[PARSO-FIX] Added '%s' at line %d", close_char, line_num)
+                            fixed = True
+
+            if fixed:
+                return '\n'.join(lines)
+
+        except Exception as e:
+            logger.debug("[PARSO-FIX] Failed: %s", e)
+
+        return None
 
     def _enhance_error_context(self, code: str, errors: list[str]) -> list[str]:
         """Enhance error messages with specific context to help LLM fix them.

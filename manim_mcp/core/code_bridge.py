@@ -1703,7 +1703,7 @@ def bridge_code(
     Returns:
         Transformed code ready for manimgl execution
     """
-    # First, sanitize LaTeX strings to fix common syntax errors
+    # Sanitize LaTeX strings to fix common syntax errors
     # This runs BEFORE AST parsing to fix unterminated strings, unbalanced braces, etc.
     try:
         code, latex_fixes = sanitize_latex_strings(code)
