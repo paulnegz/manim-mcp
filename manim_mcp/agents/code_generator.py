@@ -1493,7 +1493,9 @@ class CodeGeneratorAgent(BaseAgent):
                 meta = sig.get("metadata", {})
                 method_name = meta.get("name", "")
                 class_name = meta.get("class_name", "")
-                parameters = meta.get("parameters", "")
+                parameters = meta.get("parameters", "") or meta.get("valid_params", "")
+                # Get REQUIRED params - critical for preventing errors!
+                required_params = meta.get("required_params", "") or meta.get("required", "")
 
                 # Build the header
                 if class_name and method_name:
@@ -1508,7 +1510,11 @@ class CodeGeneratorAgent(BaseAgent):
                 # Extract and format the signature line if available
                 if parameters:
                     parts.append(f"**Signature:** `{header}({parameters})`")
-                    parts.append("")
+
+                # CRITICAL: Emphasize REQUIRED params to prevent TypeError
+                if required_params:
+                    parts.append(f"⚠️ **REQUIRED (must provide):** `{required_params}`")
+                parts.append("")
 
                 # Format the full content with parameter details
                 # Truncate long content but preserve signature info

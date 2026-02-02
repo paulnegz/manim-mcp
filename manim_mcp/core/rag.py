@@ -304,10 +304,11 @@ class ChromaDBService:
         n_results: int = 5,
         exact_match_boost: float = 2.0,
     ) -> list[dict]:
-        """Search for API signatures using hybrid search (keyword + semantic).
+        """Search for API signatures using hybrid search (keyword + semantic + Probe).
 
         Combines exact keyword matching on method names with semantic similarity
-        for better retrieval of API methods like 'FadeIn', 'Transform', etc.
+        and Probe AST-aware code search for better retrieval of API methods
+        like 'FadeIn', 'Transform', etc.
 
         Args:
             query: Method name, class name, or description
@@ -317,18 +318,73 @@ class ChromaDBService:
         Returns:
             List of matching API signatures with metadata, ranked by hybrid score
         """
-        if not self.available or not self._api_collection:
-            return []
+        import asyncio
 
-        try:
-            return await self._search_api_hybrid(
-                query=query,
-                n_results=n_results,
-                exact_match_boost=exact_match_boost,
+        chromadb_results = []
+        probe_results = []
+
+        async def chromadb_search():
+            if not self.available or not self._api_collection:
+                return []
+            try:
+                return await self._search_api_hybrid(
+                    query=query,
+                    n_results=n_results,
+                    exact_match_boost=exact_match_boost,
+                )
+            except Exception as e:
+                logger.warning("ChromaDB API signature search failed: %s", e)
+                return []
+
+        async def probe_search():
+            if not self._probe_searcher or not self._probe_searcher.available:
+                return []
+            try:
+                # Extract method/class name from query for Probe search
+                import re
+                # Look for CamelCase or snake_case identifiers
+                identifiers = re.findall(r'[A-Z][a-zA-Z0-9]*|[a-z_][a-z0-9_]+', query)
+                if not identifiers:
+                    return []
+
+                # Search for the most likely method name
+                method_name = identifiers[0]
+                class_name = None
+                if '.' in query:
+                    parts = query.split('.')[0].split()
+                    if parts:
+                        class_name = parts[-1] if parts[-1][0].isupper() else None
+
+                result = await self._probe_searcher.search_api(
+                    method_name=method_name,
+                    class_name=class_name,
+                    max_tokens=2000,
+                )
+                return result.to_rag_format()
+            except Exception as e:
+                logger.warning("Probe API search failed: %s", e)
+                return []
+
+        # Execute both searches concurrently
+        chromadb_results, probe_results = await asyncio.gather(
+            chromadb_search(),
+            probe_search(),
+        )
+
+        # Merge results with Probe boost for AST-aware matches
+        merged = self._merge_search_results(
+            chromadb_results,
+            probe_results,
+            probe_boost=0.1,  # Smaller boost for API (ChromaDB has good exact matches)
+        )
+
+        if probe_results:
+            logger.info(
+                "[RAG] API search merged %d ChromaDB + %d Probe -> %d unique",
+                len(chromadb_results), len(probe_results), len(merged)
             )
-        except Exception as e:
-            logger.warning("API signature search failed: %s", e)
-            return []
+
+        return merged[:n_results]
 
     async def _search_api_hybrid(
         self,
@@ -643,7 +699,10 @@ class ChromaDBService:
         query: str,
         n_results: int = 3,
     ) -> list[dict]:
-        """Search for animation patterns matching a query.
+        """Search for animation patterns using hybrid ChromaDB + Probe search.
+
+        Combines ChromaDB semantic search with Probe AST-aware pattern search
+        for better retrieval of animation patterns (Riemann, Transform, 3D, etc.).
 
         Args:
             query: Math concept, animation type, or description
@@ -652,21 +711,94 @@ class ChromaDBService:
         Returns:
             List of matching patterns with metadata and code templates
         """
-        if not self.available or not self._patterns_collection:
-            return []
+        import asyncio
 
-        try:
-            results = self._patterns_collection.query(
-                query_texts=[query],
-                n_results=n_results,
-                include=["documents", "metadatas", "distances"],
+        chromadb_results = []
+        probe_results = []
+
+        async def chromadb_search():
+            if not self.available or not self._patterns_collection:
+                return []
+            try:
+                results = self._patterns_collection.query(
+                    query_texts=[query],
+                    n_results=n_results * 2,  # Fetch more for merging
+                    include=["documents", "metadatas", "distances"],
+                )
+                return self._format_results(results)
+            except Exception as e:
+                logger.warning("ChromaDB animation pattern search failed: %s", e)
+                return []
+
+        async def probe_search():
+            if not self._probe_searcher or not self._probe_searcher.available:
+                return []
+            try:
+                # Detect pattern type from query
+                query_lower = query.lower()
+                pattern_type = query  # Default to raw query
+
+                # Map common terms to Probe's pattern types
+                pattern_mappings = {
+                    "riemann": "riemann",
+                    "integral": "riemann",
+                    "rectangle": "riemann",
+                    "transform": "transform",
+                    "morph": "transform",
+                    "3d": "3d",
+                    "three": "3d",
+                    "surface": "3d",
+                    "graph": "graph",
+                    "plot": "graph",
+                    "axes": "graph",
+                    "matrix": "matrix",
+                    "linear": "matrix",
+                    "geometry": "geometry",
+                    "polygon": "geometry",
+                    "triangle": "geometry",
+                    "circle": "geometry",
+                    "text": "text",
+                    "tex": "text",
+                    "latex": "text",
+                    "arrow": "arrow",
+                    "vector": "arrow",
+                }
+
+                for keyword, ptype in pattern_mappings.items():
+                    if keyword in query_lower:
+                        pattern_type = ptype
+                        break
+
+                result = await self._probe_searcher.search_patterns(
+                    pattern_type=pattern_type,
+                    max_tokens=3000,
+                    max_results=n_results,
+                )
+                return result.to_rag_format()
+            except Exception as e:
+                logger.warning("Probe pattern search failed: %s", e)
+                return []
+
+        # Execute both searches concurrently
+        chromadb_results, probe_results = await asyncio.gather(
+            chromadb_search(),
+            probe_search(),
+        )
+
+        # Merge results with Probe boost for complete code blocks
+        merged = self._merge_search_results(
+            chromadb_results,
+            probe_results,
+            probe_boost=0.2,  # Higher boost - Probe returns complete pattern implementations
+        )
+
+        if probe_results:
+            logger.info(
+                "[RAG] Pattern search merged %d ChromaDB + %d Probe -> %d unique",
+                len(chromadb_results), len(probe_results), len(merged)
             )
 
-            return self._format_results(results)
-
-        except Exception as e:
-            logger.warning("Animation pattern search failed: %s", e)
-            return []
+        return merged[:n_results]
 
     async def search_intro_outro_patterns(
         self,
@@ -1367,6 +1499,98 @@ class ChromaDBService:
         except Exception as e:
             logger.warning("Failed to update error pattern success: %s", e)
             return False
+
+    async def expand_result_context(
+        self,
+        result: dict,
+    ) -> dict:
+        """Expand a search result to include full code block context using Probe.
+
+        When a search result contains a file path and line number, use Probe's
+        extract command to get the complete function/class containing that line.
+        This is useful when ChromaDB returns truncated snippets.
+
+        Args:
+            result: A search result dict with 'content' and 'metadata' fields
+
+        Returns:
+            The result dict with 'content' potentially expanded to full code block
+        """
+        if not self._probe_searcher or not self._probe_searcher.available:
+            return result
+
+        metadata = result.get("metadata", {})
+        file_path = metadata.get("file") or metadata.get("file_path") or metadata.get("source_file")
+        line_start = metadata.get("line_start") or metadata.get("line")
+
+        if not file_path or not line_start:
+            return result
+
+        try:
+            # Use Probe extract to get full code block
+            extracted = await self._probe_searcher.extract(
+                file_path=file_path,
+                line=int(line_start),
+            )
+
+            if extracted and extracted.code:
+                # Only replace if extracted content is larger (more context)
+                original_len = len(result.get("content", ""))
+                extracted_len = len(extracted.code)
+
+                if extracted_len > original_len:
+                    logger.debug(
+                        "[RAG] Expanded result context: %d -> %d chars (%s:%d)",
+                        original_len, extracted_len, file_path, line_start
+                    )
+                    result = {
+                        **result,
+                        "content": extracted.code,
+                        "metadata": {
+                            **metadata,
+                            "line_start": extracted.line_start,
+                            "line_end": extracted.line_end,
+                            "expanded_by_probe": True,
+                        },
+                    }
+
+            return result
+
+        except Exception as e:
+            logger.debug("Failed to expand result context: %s", e)
+            return result
+
+    async def expand_results_context(
+        self,
+        results: list[dict],
+        max_expand: int = 3,
+    ) -> list[dict]:
+        """Expand multiple search results to include full code block context.
+
+        Expands up to max_expand results (to avoid excessive Probe calls).
+        Prioritizes results with the highest similarity scores.
+
+        Args:
+            results: List of search result dicts
+            max_expand: Maximum number of results to expand (default 3)
+
+        Returns:
+            List of results with top results potentially expanded
+        """
+        import asyncio
+
+        if not results or not self._probe_searcher or not self._probe_searcher.available:
+            return results
+
+        # Expand top N results concurrently
+        to_expand = results[:max_expand]
+        rest = results[max_expand:]
+
+        expanded = await asyncio.gather(
+            *[self.expand_result_context(r) for r in to_expand]
+        )
+
+        return list(expanded) + rest
 
     async def get_collection_stats(self) -> dict:
         """Get statistics about all collections.

@@ -152,9 +152,11 @@ class AnimationPipeline:
                         )
 
                         # Stitch audio segments paced to video duration
-                        audio_data = self.tts.stitch_audio_for_duration(audio_segments, target_audio_duration)
+                        audio_data, subtitle_timings = self.tts.stitch_audio_for_duration(
+                            audio_segments, target_audio_duration
+                        )
 
-                        # Save audio
+                        # Save audio and generate SRT subtitles
                         import tempfile
                         audio_dir = os.path.join(tempfile.gettempdir(), f"manim_mcp_{render_id}")
                         os.makedirs(audio_dir, exist_ok=True)
@@ -162,9 +164,18 @@ class AnimationPipeline:
                         with open(audio_path, "wb") as f:
                             f.write(audio_data)
 
+                        # Generate SRT subtitles from narration script and timings
+                        srt_path = None
+                        if narration_script and subtitle_timings:
+                            srt_content = self.tts.generate_srt(narration_script, subtitle_timings)
+                            srt_path = os.path.join(audio_dir, "subtitles.srt")
+                            with open(srt_path, "w", encoding="utf-8") as f:
+                                f.write(srt_content)
+                            logger.info("Generated SRT subtitles: %s", srt_path)
+
                         await report("mixing_audio", 80)
                         mixed_path = await self._mix_audio_video(
-                            result.local_path, audio_path, params.video_speed
+                            result.local_path, audio_path, params.video_speed, srt_path
                         )
                         result.local_path = mixed_path
                         has_audio = True
@@ -221,6 +232,32 @@ class AnimationPipeline:
                             logger.info("Uploaded mobile-transcoded video to S3: %s", s3_key)
                         except Exception as e:
                             logger.warning("Failed to upload mobile-transcoded video: %s", e)
+
+            # Generate thumbnail from FINAL video and embed it
+            await report("generating_thumbnail", 92)
+            if result.local_path and os.path.exists(result.local_path):
+                thumb_url, thumb_key, thumb_path = await self._generate_thumbnail(
+                    result.local_path, render_id
+                )
+                if thumb_path and os.path.exists(thumb_path):
+                    # Embed thumbnail into video file
+                    await self._embed_thumbnail_in_video(result.local_path, thumb_path)
+                    # Clean up thumbnail file
+                    try:
+                        os.unlink(thumb_path)
+                    except Exception:
+                        pass
+                    # Re-upload video with embedded thumbnail
+                    if self.storage.available and result.s3_object_key:
+                        try:
+                            await self.storage.upload_file(result.local_path, result.s3_object_key)
+                            result.url = await self.storage.generate_presigned_url(result.s3_object_key)
+                            result.file_size_bytes = os.path.getsize(result.local_path)
+                            logger.info("Re-uploaded video with embedded thumbnail")
+                        except Exception as e:
+                            logger.warning("Failed to re-upload video with thumbnail: %s", e)
+                result.thumbnail_url = thumb_url
+                result.thumbnail_s3_key = thumb_key
 
             await report("finalizing", 95)
 
@@ -346,9 +383,11 @@ class AnimationPipeline:
                         )
 
                         # Stitch audio segments paced to video duration
-                        audio_data = self.tts.stitch_audio_for_duration(audio_segments, target_audio_duration)
+                        audio_data, subtitle_timings = self.tts.stitch_audio_for_duration(
+                            audio_segments, target_audio_duration
+                        )
 
-                        # Save audio
+                        # Save audio and generate SRT subtitles
                         import tempfile
                         audio_dir = os.path.join(tempfile.gettempdir(), f"manim_mcp_{render_id}")
                         os.makedirs(audio_dir, exist_ok=True)
@@ -356,9 +395,18 @@ class AnimationPipeline:
                         with open(audio_path, "wb") as f:
                             f.write(audio_data)
 
+                        # Generate SRT subtitles from narration script and timings
+                        srt_path = None
+                        if narration_script and subtitle_timings:
+                            srt_content = self.tts.generate_srt(narration_script, subtitle_timings)
+                            srt_path = os.path.join(audio_dir, "subtitles.srt")
+                            with open(srt_path, "w", encoding="utf-8") as f:
+                                f.write(srt_content)
+                            logger.info("Generated SRT subtitles: %s", srt_path)
+
                         await report("mixing_audio", 80)
                         mixed_path = await self._mix_audio_video(
-                            result.local_path, audio_path, params.video_speed
+                            result.local_path, audio_path, params.video_speed, srt_path
                         )
                         result.local_path = mixed_path
                         has_audio = True
@@ -415,6 +463,32 @@ class AnimationPipeline:
                             logger.info("Uploaded mobile-transcoded video to S3: %s", s3_key)
                         except Exception as e:
                             logger.warning("Failed to upload mobile-transcoded video: %s", e)
+
+            # Generate thumbnail from FINAL video and embed it
+            await report("generating_thumbnail", 92)
+            if result.local_path and os.path.exists(result.local_path):
+                thumb_url, thumb_key, thumb_path = await self._generate_thumbnail(
+                    result.local_path, render_id
+                )
+                if thumb_path and os.path.exists(thumb_path):
+                    # Embed thumbnail into video file
+                    await self._embed_thumbnail_in_video(result.local_path, thumb_path)
+                    # Clean up thumbnail file
+                    try:
+                        os.unlink(thumb_path)
+                    except Exception:
+                        pass
+                    # Re-upload video with embedded thumbnail
+                    if self.storage.available and result.s3_object_key:
+                        try:
+                            await self.storage.upload_file(result.local_path, result.s3_object_key)
+                            result.url = await self.storage.generate_presigned_url(result.s3_object_key)
+                            result.file_size_bytes = os.path.getsize(result.local_path)
+                            logger.info("Re-uploaded video with embedded thumbnail")
+                        except Exception as e:
+                            logger.warning("Failed to re-upload video with thumbnail: %s", e)
+                result.thumbnail_url = thumb_url
+                result.thumbnail_s3_key = thumb_key
 
             await report("finalizing", 95)
 
@@ -520,6 +594,32 @@ class AnimationPipeline:
                         except Exception as e:
                             logger.warning("Failed to upload mobile-transcoded video: %s", e)
 
+            # Generate thumbnail from FINAL video and embed it
+            await report("generating_thumbnail", 93)
+            if result.local_path and os.path.exists(result.local_path):
+                thumb_url, thumb_key, thumb_path = await self._generate_thumbnail(
+                    result.local_path, new_id
+                )
+                if thumb_path and os.path.exists(thumb_path):
+                    # Embed thumbnail into video file
+                    await self._embed_thumbnail_in_video(result.local_path, thumb_path)
+                    # Clean up thumbnail file
+                    try:
+                        os.unlink(thumb_path)
+                    except Exception:
+                        pass
+                    # Re-upload video with embedded thumbnail
+                    if self.storage.available and result.s3_object_key:
+                        try:
+                            await self.storage.upload_file(result.local_path, result.s3_object_key)
+                            result.url = await self.storage.generate_presigned_url(result.s3_object_key)
+                            result.file_size_bytes = os.path.getsize(result.local_path)
+                            logger.info("Re-uploaded video with embedded thumbnail")
+                        except Exception as e:
+                            logger.warning("Failed to re-upload video with thumbnail: %s", e)
+                result.thumbnail_url = thumb_url
+                result.thumbnail_s3_key = thumb_key
+
             await report("finalizing", 95)
 
             return AnimationResult(
@@ -607,11 +707,25 @@ class AnimationPipeline:
             sigs = await self.rag.search_api_signatures(search_query, n_results=3)
             for sig in sigs:
                 meta = sig.get("metadata", {})
-                # Try parameter_names first (from AST), then parameters
-                params = meta.get("parameter_names", "") or meta.get("parameters", "")
+                # Try parameter_names first (from AST), then parameters, then valid_params
+                params = meta.get("parameter_names", "") or meta.get("parameters", "") or meta.get("valid_params", "")
+                # Get required params - check both 'required' and 'required_params' keys
+                required = meta.get("required_params", "") or meta.get("required", [])
+                if isinstance(required, str):
+                    required = [r.strip() for r in required.split(",") if r.strip()]
                 if params:
-                    # Build helpful hint with valid params
-                    hint = f"[API] {search_query} valid params: {params[:300]}"
+                    # Build helpful hint - emphasize REQUIRED params first!
+                    if required:
+                        required_str = ", ".join(required) if isinstance(required, list) else str(required)
+                        # Split params into required vs optional
+                        param_list = [p.strip() for p in params.split(",")]
+                        optional = [p for p in param_list if p not in required]
+                        optional_str = ", ".join(optional[:10])  # Limit optional list
+                        hint = f"[API] {search_query} REQUIRED: {required_str}"
+                        if optional_str:
+                            hint += f" | Optional: {optional_str}"
+                    else:
+                        hint = f"[API] {search_query} valid params: {params[:300]}"
                     # If we detected an invalid param, explicitly call it out
                     if invalid_param and invalid_param not in params:
                         hint += f"\n  ❌ '{invalid_param}' is NOT a valid parameter!"
@@ -764,7 +878,7 @@ class AnimationPipeline:
                 output.s3_url = await self.storage.upload_file(output.local_path, s3_key)
                 output.s3_object_key = s3_key
                 output.url = await self.storage.generate_presigned_url(s3_key)
-                output.thumbnail_url, output.thumbnail_s3_key = await self._generate_thumbnail(
+                output.thumbnail_url, output.thumbnail_s3_key, _ = await self._generate_thumbnail(
                     output.local_path, render_id,
                 )
             except Exception as e:
@@ -1044,19 +1158,22 @@ The timing and visuals must sync with this script."""
 
         return "; ".join(hints) if hints else ""
 
-    async def _generate_thumbnail(self, video_path: str, render_id: str) -> tuple[str | None, str | None]:
-        """Generate thumbnail and return (presigned_url, s3_key)."""
+    async def _generate_thumbnail(self, video_path: str, render_id: str) -> tuple[str | None, str | None, str | None]:
+        """Generate thumbnail and return (presigned_url, s3_key, local_path).
+
+        The local_path is kept for embedding into the video file.
+        """
         if not shutil.which("ffmpeg") or not self.storage.available:
-            return None, None
+            return None, None, None
 
         if video_path.endswith(".png"):
             thumb_key = f"{self.config.s3_prefix}{render_id}/thumbnail.png"
             try:
                 await self.storage.upload_file(video_path, thumb_key, "image/png")
                 url = await self.storage.generate_presigned_url(thumb_key)
-                return url, thumb_key
+                return url, thumb_key, video_path
             except Exception:
-                return None, None
+                return None, None, None
 
         import tempfile
         thumb_path = os.path.join(tempfile.gettempdir(), f"{render_id}_thumb.png")
@@ -1098,14 +1215,69 @@ The timing and visuals must sync with this script."""
                 thumb_key = f"{self.config.s3_prefix}{render_id}/thumbnail.png"
                 await self.storage.upload_file(thumb_path, thumb_key, "image/png")
                 url = await self.storage.generate_presigned_url(thumb_key)
-                return url, thumb_key
+                # Return local path too - don't delete yet, needed for embedding
+                return url, thumb_key, thumb_path
         except Exception as e:
             logger.debug("Thumbnail generation failed: %s", e)
-        finally:
             if os.path.exists(thumb_path):
                 os.unlink(thumb_path)
 
-        return None, None
+        return None, None, None
+
+    async def _embed_thumbnail_in_video(self, video_path: str, thumb_path: str) -> str:
+        """Embed thumbnail as cover art/attached picture in MP4 file.
+
+        This makes the thumbnail visible when video is downloaded and viewed
+        in file browsers, video players, etc.
+
+        Returns path to video with embedded thumbnail (or original if failed).
+        """
+        if not os.path.exists(thumb_path) or not os.path.exists(video_path):
+            return video_path
+
+        if not video_path.endswith(".mp4"):
+            # Only MP4 supports attached pictures well
+            return video_path
+
+        output_path = video_path.replace(".mp4", "_with_thumb.mp4")
+
+        try:
+            # Embed thumbnail as attached picture (cover art)
+            # -map 0 = all streams from video
+            # -map 1 = thumbnail image
+            # -c copy = copy all streams without re-encoding
+            # -c:v:1 mjpeg = encode thumbnail as mjpeg (required for attached_pic)
+            # -disposition:v:1 attached_pic = mark second video stream as cover art
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-i", thumb_path,
+                "-map", "0",
+                "-map", "1",
+                "-c", "copy",
+                "-c:v:1", "mjpeg",
+                "-disposition:v:1", "attached_pic",
+                output_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+
+            if proc.returncode == 0 and os.path.exists(output_path):
+                # Replace original with thumbnail-embedded version
+                os.replace(output_path, video_path)
+                logger.info("Embedded thumbnail into video: %s", video_path)
+                return video_path
+            else:
+                logger.warning("Failed to embed thumbnail: %s", stderr.decode()[:200] if stderr else "unknown error")
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
+        except Exception as e:
+            logger.warning("Thumbnail embedding failed: %s", e)
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+
+        return video_path
 
     # ── Self-Indexing Hooks ────────────────────────────────────────────
 
@@ -1351,7 +1523,7 @@ The timing and visuals must sync with this script."""
             logger.info("TTS completed: %d/%d sentences successful", successful, len(script))
 
             # Stitch audio adjusted to fit target duration
-            audio_data = self.tts.stitch_audio_for_duration(audio_segments, target_duration)
+            audio_data, _ = self.tts.stitch_audio_for_duration(audio_segments, target_duration)
 
             # Save to temp file
             import tempfile
@@ -1369,8 +1541,10 @@ The timing and visuals must sync with this script."""
             if original_voice:
                 self.tts.voice = original_voice
 
-    async def _mix_audio_video(self, video_path: str, audio_path: str, video_speed: float = 0.70) -> str:
-        """Mix audio track into video using ffmpeg.
+    async def _mix_audio_video(
+        self, video_path: str, audio_path: str, video_speed: float = 0.70, srt_path: str | None = None
+    ) -> str:
+        """Mix audio track into video using ffmpeg, optionally burning in subtitles.
 
         Handles duration mismatch without looping:
         - If audio is longer: freeze on last frame until audio ends
@@ -1380,6 +1554,7 @@ The timing and visuals must sync with this script."""
             video_path: Path to the rendered video
             audio_path: Path to the audio narration
             video_speed: Speed factor for video (0.75 = 75% speed, slower). Default 0.75.
+            srt_path: Optional path to SRT subtitle file to burn into video
 
         Returns:
             Path to the output video with audio
@@ -1410,6 +1585,15 @@ The timing and visuals must sync with this script."""
                 video_speed * 100, video_duration, adjusted_video_duration
             )
 
+        # Build subtitle filter if SRT provided
+        subtitle_filter = ""
+        if srt_path and os.path.exists(srt_path):
+            # Escape path for ffmpeg filter (colons and backslashes need escaping)
+            escaped_path = srt_path.replace("\\", "\\\\").replace(":", "\\:")
+            # Force style for readability: white text with black outline
+            subtitle_filter = f",subtitles='{escaped_path}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Shadow=1,MarginV=30'"
+            logger.info("Burning subtitles from: %s", srt_path)
+
         logger.info(
             "Mixing audio into video: %s (%.1fs adj) + %s (%.1fs) -> %s",
             video_path, adjusted_video_duration, audio_path, audio_duration, output_path
@@ -1427,7 +1611,7 @@ The timing and visuals must sync with this script."""
                 "-i", video_path,
                 "-i", audio_path,
                 "-filter_complex",
-                f"[0:v]{speed_filter}tpad=stop_mode=clone:stop_duration={pad_duration}[v]",
+                f"[0:v]{speed_filter}tpad=stop_mode=clone:stop_duration={pad_duration}{subtitle_filter}[v]",
                 "-map", "[v]",
                 "-map", "1:a",
                 "-c:v", "libx264", "-preset", "fast",
@@ -1447,7 +1631,7 @@ The timing and visuals must sync with this script."""
                 "-i", video_path,
                 "-i", audio_path,
                 "-filter_complex",
-                f"[0:v]{speed_filter}null[v];[1:a]apad=whole_dur={adjusted_video_duration}[a]",
+                f"[0:v]{speed_filter}null{subtitle_filter}[v];[1:a]apad=whole_dur={adjusted_video_duration}[a]",
                 "-map", "[v]",
                 "-map", "[a]",
                 "-c:v", "libx264", "-preset", "fast",
