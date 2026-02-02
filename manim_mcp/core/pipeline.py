@@ -990,8 +990,8 @@ class AnimationPipeline:
                             warning = f"- [{error_type}] {error_reason}"
                         warnings.append(warning)
 
-            # Limit to most relevant warnings
-            warnings = warnings[:5]
+            # Limit to most relevant warnings - keep lean to avoid context overload
+            warnings = warnings[:2]
 
             if warnings:
                 logger.info("[PRE-FLIGHT] Found %d warnings for similar prompts", len(warnings))
@@ -1013,13 +1013,13 @@ class AnimationPipeline:
             try:
                 similar_scenes = await self.rag.search_similar_scenes(
                     query=prompt,
-                    n_results=3,
+                    n_results=1,  # Just 1 best example to keep context lean
                     prioritize_3b1b=True,
                 )
-                if similar_scenes:
-                    logger.info("[RAG] Found %d similar scenes for context", len(similar_scenes))
+                if similar_scenes and similar_scenes[0].get("similarity_score", 0) > 0.6:
+                    logger.info("[RAG] Found similar scene (score=%.2f)", similar_scenes[0].get("similarity_score", 0))
                     rag_context = self._build_rag_context(similar_scenes)
-                    enhanced_prompt = f"{prompt}\n\nHere are some similar animations for reference:\n{rag_context}"
+                    enhanced_prompt = f"{prompt}\n\nReference example:\n{rag_context}"
             except Exception as e:
                 logger.warning("[RAG] Failed to query similar scenes: %s", e)
 
@@ -1067,14 +1067,11 @@ The timing and visuals must sync with this script."""
             else:
                 lines.append(f"\nExample {i} (similarity: {similarity:.2f}):")
 
-            # Show more code for high-similarity matches (up to 3000 chars)
-            # This allows LLM to follow working patterns closely instead of inventing
-            max_chars = 3000 if similarity > 0.7 else 1500
+            # Keep code snippets compact to avoid context overload
+            max_chars = 1000
             code = scene.get("content", "")[:max_chars]
             if code:
                 lines.append(f"```python\n{code}\n```")
-                if similarity > 0.8:
-                    lines.append("**IMPORTANT: This is a highly relevant example. Follow this pattern closely.**")
         return "\n".join(lines)
 
     async def _edit_and_validate(self, original_code: str, instructions: str) -> str:
