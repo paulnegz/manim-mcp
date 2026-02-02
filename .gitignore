@@ -32,19 +32,6 @@ htmlcov/
 media/
 renders.db
 
-# ChromaDB data
-data/chromadb/
-
-# Additional venvs
-.venv*/
-.python-version
-
-# Logs
-*.log
-
-# Plan files
-PLAN-*.md
-
 # OS
 .DS_Store
 Thumbs.db
