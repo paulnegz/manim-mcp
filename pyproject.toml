@@ -15,10 +15,6 @@ include = [
 [tool.hatch.build.targets.wheel.sources]
 "manim_mcp" = "manim_mcp"
 
-# Include prompt .md files in the package
-[tool.hatch.build.force-include]
-"manim_mcp/prompts/*.md" = "manim_mcp/prompts/"
-
 [project]
 name = "manim-mcp"
 version = "0.1.0"
@@ -42,11 +38,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 
-[project.urls]
-Homepage = "https://github.com/paulnegz/manim-mcp"
-Repository = "https://github.com/paulnegz/manim-mcp"
-Documentation = "https://github.com/paulnegz/manim-mcp#readme"
-
 dependencies = [
     "mcp>=1.0.0",
     "pydantic>=2.0.0",
@@ -57,6 +48,11 @@ dependencies = [
     "pydub>=0.25.0",
     "networkx>=3.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/paulnegz/manim-mcp"
+Repository = "https://github.com/paulnegz/manim-mcp"
+Documentation = "https://github.com/paulnegz/manim-mcp#readme"
 
 [project.scripts]
 manim-mcp = "manim_mcp.cli:cli_main"

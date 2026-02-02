@@ -2,6 +2,8 @@
 
 LLMs often generate Manim CE code because it's more common in training data.
 This module transforms CE patterns to manimgl equivalents before rendering.
+
+IMPORTANT: Only transform classes that do NOT exist in manimgl!
 """
 
 from __future__ import annotations
@@ -17,56 +19,183 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _get_manimgl_names() -> set[str]:
+    """Get all public names (classes, functions, animations) available in manimlib.
+
+    This is used to prevent transforming things that actually exist in manimgl.
+    Rule: Only transform CE-only things. If it exists in 3b1b's manimgl, don't touch it!
+
+    NOTE: We catch BaseException (not just Exception) because manimlib's config.parse_cli()
+    can raise SystemExit when it sees unexpected CLI args (e.g., --transport from MCP server).
+    """
+    try:
+        # Clear sys.argv to prevent manimlib's argparse from picking up MCP server args
+        import sys
+        original_argv = sys.argv
+        sys.argv = [sys.argv[0]]  # Keep only program name
+        try:
+            import manimlib
+            names = set()
+            for name in dir(manimlib):
+                if not name.startswith('_'):
+                    names.add(name)
+            logger.debug("[CODE-BRIDGE] Found %d manimgl names", len(names))
+            return names
+        finally:
+            sys.argv = original_argv  # Restore original argv
+    except BaseException as e:
+        logger.warning("[CODE-BRIDGE] Could not introspect manimlib: %s", e)
+        # Fallback: known names that exist in manimgl (manually verified via GitHub)
+        return {
+            # Classes - Core
+            "ComplexPlane", "ThreeDScene", "MarkupText", "OldTex", "OldTexText",
+            "TracedPath", "SurroundingRectangle", "BackgroundRectangle",
+            "NumberPlane", "Axes", "Scene",
+            "Tex", "TexText", "Text", "VGroup", "VMobject", "Mobject",
+            # Classes - Special text (exist in manimlib/mobject/svg/special_tex.py)
+            "Title", "BulletedList",
+            # Classes - Code (exists in manimlib/mobject/svg/text_mobject.py)
+            "Code",
+            # Classes - Indicators (exist in manimlib/mobject/svg/drawings.py & shape_matchers.py)
+            "Cross", "Checkmark", "Exmark",
+            # Classes - Shapes (exist in manimlib/mobject/geometry.py)
+            "Triangle", "RegularPolygon", "Polygon", "Polyline", "RoundedRectangle",
+            "Arc", "Circle", "Dot", "Line", "Arrow", "Vector", "DoubleArrow",
+            "CurvedArrow", "CurvedDoubleArrow", "DashedLine", "Elbow",
+            "AnnularSector", "Sector",
+            # Classes - Braces
+            "Brace",
+            # Classes - Numbers
+            "DecimalNumber", "Integer",
+            # Classes - Boolean ops
+            "Union", "Difference", "Intersection", "Exclusion",
+            # Classes - Value trackers
+            "ValueTracker", "ComplexValueTracker",
+            # Classes - 3D (exist in manimlib/mobject/three_dimensions.py)
+            "Surface", "ParametricSurface", "Sphere", "Torus", "Cone", "Cylinder",
+            "Prism", "Line3D",
+            # Classes - Matrix
+            "Matrix", "IntegerMatrix", "DecimalMatrix",
+            # Classes - Probability
+            "BarChart",
+            # Animations - Creation
+            "Uncreate", "Write", "DrawBorderThenFill", "ShowCreation",
+            "AddTextWordByWord", "ShowIncreasingSubsets", "ShowSubmobjectsOneByOne",
+            # Animations - Fading
+            "FadeIn", "FadeOut", "FadeInFromPoint", "FadeOutToPoint",
+            "VFadeIn", "VFadeOut", "VFadeInThenOut", "FadeTransform", "FadeTransformPieces",
+            # Animations - Transform
+            "Transform", "ReplacementTransform", "TransformFromCopy",
+            "MoveToTarget", "ApplyMethod",
+            "TransformMatchingShapes", "TransformMatchingTex",
+            # Animations - Growing
+            "GrowFromCenter", "GrowFromPoint", "GrowFromEdge", "ShrinkToCenter", "GrowArrow",
+            # Animations - Indication
+            "Indicate", "WiggleOutThenIn", "Flash", "ApplyWave", "FocusOn", "ShowPassingFlash",
+            # Animations - Composition
+            "AnimationGroup", "LaggedStart", "Succession",
+            # Functions
+            "always_redraw",
+        }
+
+
+# Names that exist in manimgl - DO NOT TRANSFORM these
+MANIMGL_NAMES = _get_manimgl_names()
+
+
 class CEToManimglTransformer(ast.NodeTransformer):
     """AST transformer that converts Manim CE patterns to manimgl."""
 
     # CE class names → manimgl equivalents
+    # NOTE: Transformations are SKIPPED if the class exists in manimgl (checked at runtime)
     CLASS_MAPPINGS = {
-        # Tex-related
+        # Tex-related (MathTex is CE-only)
         "MathTex": "Tex",
         "SingleStringMathTex": "Tex",
-        "OldTex": "Tex",  # Legacy 3b1b alias
-        "OldTexText": "TexText",  # Legacy 3b1b alias
+        "OldTex": "Tex",  # Will be skipped if exists in manimgl
+        "OldTexText": "TexText",  # Will be skipped if exists in manimgl
         # Shapes
-        "SurroundRectangle": "SurroundingRectangle",  # CE uses SurroundRectangle
-        "BackgroundRectangle": "SurroundingRectangle",  # CE has BackgroundRectangle
-        "Cutout": "VMobject",  # CE-only, fallback
-        # Scene types (manimgl uses Scene for everything)
-        "ThreeDScene": "Scene",  # manimgl auto-detects 3D
+        "SurroundRectangle": "SurroundingRectangle",  # CE uses different name
+        # NOTE: BackgroundRectangle exists in manimgl - don't transform it!
+        "Cutout": "VMobject",  # CE-only
+        "Star": "RegularPolygon",  # CE-only
+        "ArcPolygon": "Polygon",  # CE-only
+        "ArcPolygonFromArcs": "Polygon",  # CE-only
+        # Geometry/angles
+        "Angle": "Arc",  # CE-only - manimgl has no Angle class
+        "RightAngle": "Elbow",  # CE-only - manimgl uses Elbow
+        # Braces
+        "BraceBetweenPoints": "Brace",  # CE-only
+        "ArcBrace": "Brace",  # CE-only
+        # Scene types
+        "ThreeDScene": "Scene",  # Will be skipped if exists in manimgl
         "ZoomedScene": "Scene",  # CE-only
-        "MovingCameraScene": "Scene",  # CE-only, manimgl uses frame
+        "MovingCameraScene": "Scene",  # CE-only
         "VectorScene": "Scene",  # CE-only
+        "SpecialThreeDScene": "ThreeDScene",  # CE-only
         # Mobject types
-        "MarkupText": "TexText",  # CE uses MarkupText for Pango, manimgl uses TexText
-        "Paragraph": "TexText",  # CE-only, approximate
-        "Title": "TexText",  # CE-only convenience class
-        "BulletedList": "VGroup",  # CE-only
-        "Code": "TexText",  # CE-only syntax highlighting
+        "MarkupText": "TexText",  # Will be skipped if exists in manimgl
+        "Paragraph": "TexText",  # CE-only (removed from manimgl per issue #1638)
+        "Variable": "DecimalNumber",  # CE-only
+        # NOTE: Title exists in manimgl (class Title(TexText)) - don't transform!
+        # NOTE: BulletedList exists in manimgl (class BulletedList(VGroup)) - don't transform!
+        # NOTE: Code exists in manimgl (class Code(MarkupText)) - don't transform!
+        # Tables (CE-only)
+        "Table": "VGroup",  # CE-only
+        "MathTable": "VGroup",  # CE-only
+        "IntegerTable": "VGroup",  # CE-only
+        "DecimalTable": "VGroup",  # CE-only
         # Math/geometric
-        "ComplexPlane": "NumberPlane",  # Same functionality
-        "PolarPlane": "NumberPlane",  # CE-only, approximate
+        "ComplexPlane": "NumberPlane",  # Will be skipped if exists in manimgl
+        "PolarPlane": "NumberPlane",  # CE-only
         # Indicators
-        "Cross": "VGroup",  # CE-only, fallback
-        "Checkmark": "Tex",  # CE-only
-        "Exmark": "Tex",  # CE-only
-        # Path tracing (both support TracedPath, ensure it's recognized)
-        "TracedPath": "TracedPath",  # Same in both, but ensure proper handling
+        # NOTE: Cross exists in manimgl (class Cross(VGroup)) - don't transform!
+        # NOTE: Checkmark exists in manimgl (class Checkmark(TexTextFromPresetString)) - don't transform!
+        # NOTE: Exmark exists in manimgl (class Exmark(TexTextFromPresetString)) - don't transform!
+        "LabeledDot": "Dot",  # CE-only
+        "AnnotationDot": "Dot",  # CE-only
+        # 3D objects (CE-only)
+        "Arrow3D": "Arrow",  # CE-only - manimgl Arrow works in 3D
+        "Dot3D": "Dot",  # CE-only - manimgl Dot works in 3D
+        # Graphs (node/edge, not function graphs)
+        "Graph": "VGroup",  # CE-only
+        "DiGraph": "VGroup",  # CE-only
+        # Path tracing
+        "TracedPath": "TracedPath",  # Will be skipped if exists in manimgl
         "VMobjectTrace": "TracedPath",  # CE alias
     }
 
     # CE function/animation names → manimgl equivalents
     FUNCTION_MAPPINGS = {
+        # Creation animations
         "Create": "ShowCreation",
         "Uncreate": "Uncreate",  # Same in both
         "Unwrite": "Uncreate",  # CE has Unwrite, manimgl uses Uncreate
-        "SpiralIn": "GrowFromCenter",  # CE-only, fallback to similar effect
+        # Text animations (CE-only)
         "AddTextLetterByLetter": "Write",  # CE-only text animation
-        "AddTextWordByWord": "Write",  # CE-only text animation
+        "AddTextWordByWord": "Write",  # Exists in manimgl but keep for safety
         "RemoveTextLetterByLetter": "Uncreate",  # CE-only
         "TypeWithCursor": "Write",  # CE-only
         "UntypeWithCursor": "Uncreate",  # CE-only
+        # Grow/shrink animations
+        "SpiralIn": "GrowFromCenter",  # CE-only, fallback to similar effect
+        "SpinInFromNothing": "GrowFromCenter",  # CE-only
+        "GrowFromSide": "GrowFromEdge",  # CE-only
+        # Transform animations
+        "ClockwiseTransform": "Transform",  # CE-only, use path_arc in manimgl
+        "CounterclockwiseTransform": "Transform",  # CE-only, use path_arc in manimgl
+        # Indication animations
         "Wiggle": "WiggleOutThenIn",  # Different name
+        "Circumscribe": "Indicate",  # CE-only
         "Blink": "VFadeIn",  # CE-only, approximate with VFade
+        # Fade animations (CE deprecated variants)
+        "FadeInFrom": "FadeIn",  # CE deprecated, manimgl uses shift param
+        "FadeInFromLarge": "FadeIn",  # CE-only, manimgl uses scale param
+        "FadeOutAndShift": "FadeOut",  # CE deprecated, manimgl uses shift param
+        "FadeOutShrink": "FadeOut",  # CE-only, manimgl uses scale param
+        "FadeInFromPoint": "FadeIn",  # Will be skipped if exists in manimgl
+        "FadeOutToPoint": "FadeOut",  # Will be skipped if exists in manimgl
+        # Apply animations
         "FadeToColor": "ApplyMethod",  # Handled differently in manimgl
         "ScaleInPlace": "ApplyMethod",  # Use mob.animate.scale() instead
         "ShrinkToCenter": "ApplyMethod",  # Use mob.animate.scale(0) instead
@@ -222,7 +351,15 @@ class CEToManimglTransformer(ast.NodeTransformer):
         return node
 
     def visit_Name(self, node: ast.Name) -> ast.Name:
-        """Transform CE class names to manimgl equivalents."""
+        """Transform CE class/function names to manimgl equivalents.
+
+        IMPORTANT: Only transform if it does NOT exist in manimgl!
+        If it exists in 3b1b's manimgl, leave it alone - it's valid code.
+        """
+        # RULE: If it exists in manimgl, don't transform!
+        if node.id in MANIMGL_NAMES:
+            return node
+
         if node.id in self.CLASS_MAPPINGS:
             new_name = self.CLASS_MAPPINGS[node.id]
             self.transformations_made.append(f"class: {node.id} → {new_name}")
@@ -412,17 +549,18 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         # MathTex that might have been missed
         (r"\bMathTex\s*\(", "Tex("),
         (r"\bSingleStringMathTex\s*\(", "Tex("),
-        # Legacy 3b1b aliases
-        (r"\bOldTex\s*\(", "Tex("),
-        (r"\bOldTexText\s*\(", "TexText("),
-        # CE-only classes → manimgl alternatives
-        (r"\bMarkupText\s*\(", "TexText("),
-        (r"\bParagraph\s*\(", "TexText("),
-        (r"\bTitle\s*\(", "TexText("),
-        (r"\bBulletedList\s*\(", "VGroup("),
-        (r"\bCode\s*\(", "TexText("),
-        # Scene types
-        (r"class\s+(\w+)\s*\(\s*ThreeDScene\s*\)", r"class \1(Scene)"),
+        # Legacy 3b1b aliases - DISABLED: these exist in manimgl
+        # (r"\bOldTex\s*\(", "Tex("),
+        # (r"\bOldTexText\s*\(", "TexText("),
+        # CE-only classes - DISABLED: MarkupText exists in manimgl
+        # (r"\bMarkupText\s*\(", "TexText("),
+        (r"\bParagraph\s*\(", "TexText("),  # CE-only (removed from manimgl per issue #1638)
+        # DISABLED: These exist in manimgl - don't transform!
+        # (r"\bTitle\s*\(", "TexText("),  # Title exists in manimgl
+        # (r"\bBulletedList\s*\(", "VGroup("),  # BulletedList exists in manimgl
+        # (r"\bCode\s*\(", "TexText("),  # Code exists in manimgl
+        # Scene types - DISABLED: ThreeDScene exists in manimgl
+        # (r"class\s+(\w+)\s*\(\s*ThreeDScene\s*\)", r"class \1(Scene)"),
         (r"class\s+(\w+)\s*\(\s*ZoomedScene\s*\)", r"class \1(Scene)"),
         (r"class\s+(\w+)\s*\(\s*MovingCameraScene\s*\)", r"class \1(Scene)"),
         (r"class\s+(\w+)\s*\(\s*VectorScene\s*\)", r"class \1(Scene)"),
@@ -435,7 +573,6 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"\bSpiralIn\s*\(", "GrowFromCenter("),
         (r"\bUnwrite\s*\(", "Uncreate("),
         (r"\bAddTextLetterByLetter\s*\(", "Write("),
-        (r"\bAddTextWordByWord\s*\(", "Write("),
         (r"\bRemoveTextLetterByLetter\s*\(", "Uncreate("),
         (r"\bTypeWithCursor\s*\(", "Write("),
         (r"\bUntypeWithCursor\s*\(", "Uncreate("),
@@ -443,10 +580,45 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"\bBlink\s*\(", "VFadeIn("),
         (r"\bFadeToColor\s*\(", "ApplyMethod("),
         (r"\bScaleInPlace\s*\(", "ApplyMethod("),
-        (r"\bShrinkToCenter\s*\(", "ApplyMethod("),
         (r"\bSpinInFromNothing\s*\(", "GrowFromCenter("),  # CE-only
+        (r"\bGrowFromSide\s*\(", "GrowFromEdge("),  # CE-only
+        # CE fade animations (deprecated/removed)
         (r"\bFadeInFrom\s*\(", "FadeIn("),  # CE deprecated
+        (r"\bFadeInFromLarge\s*\(", "FadeIn("),  # CE-only
         (r"\bFadeOutAndShift\s*\(", "FadeOut("),  # CE deprecated
+        (r"\bFadeOutShrink\s*\(", "FadeOut("),  # CE-only
+        # CE transform animations
+        (r"\bClockwiseTransform\s*\(", "Transform("),  # CE-only
+        (r"\bCounterclockwiseTransform\s*\(", "Transform("),  # CE-only
+
+        # === CE-ONLY CLASS FIXES ===
+        # Shapes
+        (r"\bStar\s*\(", "RegularPolygon("),  # CE-only
+        (r"\bArcPolygon\s*\(", "Polygon("),  # CE-only
+        (r"\bArcPolygonFromArcs\s*\(", "Polygon("),  # CE-only
+        # Geometry/angles
+        (r"\bAngle\s*\(", "Arc("),  # CE-only
+        (r"\bRightAngle\s*\(", "Elbow("),  # CE-only
+        # Braces
+        (r"\bBraceBetweenPoints\s*\(", "Brace("),  # CE-only
+        (r"\bArcBrace\s*\(", "Brace("),  # CE-only
+        # Tables
+        (r"\bTable\s*\(", "VGroup("),  # CE-only
+        (r"\bMathTable\s*\(", "VGroup("),  # CE-only
+        (r"\bIntegerTable\s*\(", "VGroup("),  # CE-only
+        (r"\bDecimalTable\s*\(", "VGroup("),  # CE-only
+        # Text
+        (r"\bVariable\s*\(", "DecimalNumber("),  # CE-only
+        # 3D objects
+        (r"\bArrow3D\s*\(", "Arrow("),  # CE-only
+        (r"\bDot3D\s*\(", "Dot("),  # CE-only
+        # Dots
+        (r"\bLabeledDot\s*\(", "Dot("),  # CE-only
+        (r"\bAnnotationDot\s*\(", "Dot("),  # CE-only
+        # Graphs (node/edge)
+        (r"\bGraph\s*\(", "VGroup("),  # CE-only (not FunctionGraph!)
+        (r"\bDigraph\s*\(", "VGroup("),  # CE-only
+        (r"\bDiGraph\s*\(", "VGroup("),  # CE-only (alternate casing)
 
         # === METHOD NAME FIXES ===
         (r"\.add_coordinates\s*\(", ".add_coordinate_labels("),
@@ -595,6 +767,13 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"\.set_fill_opacity\s*\(\s*([^)]+)\s*\)", r".set_fill(opacity=\1)"),
     ]
     for pattern, replacement in post_replacements:
+        # Extract the class/function name from pattern (e.g., r"\bCreate\s*\(" -> "Create")
+        name_match = re.search(r'\\b(\w+)', pattern)
+        if name_match:
+            name = name_match.group(1)
+            # RULE: Don't transform if it exists in manimgl!
+            if name in MANIMGL_NAMES:
+                continue
         if re.search(pattern, code):
             code = re.sub(pattern, replacement, code)
             transformations.append(f"post-regex: {pattern}")
@@ -1560,6 +1739,7 @@ def bridge_code(
         logger.debug("[CODE-BRIDGE] layout_validator not available, skipping")
     except Exception as e:
         logger.warning("[CODE-BRIDGE] Layout validation failed: %s", e)
+
 
     # Clean up dead code and fix variable shadowing
     try:

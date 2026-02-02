@@ -97,10 +97,12 @@ class ConceptName(Scene):
         self.play(LaggedStart(*[ShowCreation(e) for e in elements], lag_ratio=0.3))
 
         # Highlight the square - this is the key element
-        self.play(Indicate(elements[1], color=YELLOW), run_time=1.5)
+        self.play(Indicate(elements[1], color=YELLOW, scale_factor=1.2))
+        self.wait(1)
 
-        # Bring shapes together at center for finale
-        self.play(FadeOut(title), elements.animate.move_to(ORIGIN))
+        # Transform to show the relationship
+        result = Tex("Area = s^2").next_to(elements, DOWN, buff=0.5)
+        self.play(Write(result))
         self.wait(2)
 ```
 
