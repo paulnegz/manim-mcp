@@ -199,7 +199,9 @@ class GeminiTTSService:
             target_duration: Target duration in seconds
 
         Returns:
-            Tuple of (WAV bytes, subtitle_timings) where timings are list of (start_ms, end_ms)
+            Tuple of (WAV bytes, subtitle_timings, valid_indices) where:
+            - timings are list of (start_ms, end_ms)
+            - valid_indices are original indices of segments that succeeded
         """
         # 1 second initial offset before audio/subtitles start
         initial_offset_ms = 1000
@@ -296,7 +298,7 @@ class GeminiTTSService:
 
         output = io.BytesIO()
         combined.export(output, format="wav")
-        return output.getvalue(), subtitle_timings
+        return output.getvalue(), subtitle_timings, valid_indices
 
     @staticmethod
     def generate_srt(sentences: list[str], timings: list[tuple[int, int]], chunk_size: int = 4) -> str:

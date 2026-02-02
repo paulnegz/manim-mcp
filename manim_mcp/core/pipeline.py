@@ -168,7 +168,7 @@ class AnimationPipeline:
                         )
 
                         # Stitch audio segments paced to video duration
-                        audio_data, subtitle_timings = self.tts.stitch_audio_for_duration(
+                        audio_data, subtitle_timings, valid_indices = self.tts.stitch_audio_for_duration(
                             audio_segments, target_audio_duration
                         )
 
@@ -181,9 +181,11 @@ class AnimationPipeline:
                             f.write(audio_data)
 
                         # Generate SRT subtitles from narration script and timings
+                        # Filter to only include sentences that had successful TTS
                         srt_path = None
                         if narration_script and subtitle_timings:
-                            srt_content = self.tts.generate_srt(narration_script, subtitle_timings)
+                            valid_sentences = [narration_script[i] for i in valid_indices if i < len(narration_script)]
+                            srt_content = self.tts.generate_srt(valid_sentences, subtitle_timings)
                             srt_path = os.path.join(audio_dir, "subtitles.srt")
                             with open(srt_path, "w", encoding="utf-8") as f:
                                 f.write(srt_content)
@@ -415,7 +417,7 @@ class AnimationPipeline:
                         )
 
                         # Stitch audio segments paced to video duration
-                        audio_data, subtitle_timings = self.tts.stitch_audio_for_duration(
+                        audio_data, subtitle_timings, valid_indices = self.tts.stitch_audio_for_duration(
                             audio_segments, target_audio_duration
                         )
 
@@ -428,9 +430,11 @@ class AnimationPipeline:
                             f.write(audio_data)
 
                         # Generate SRT subtitles from narration script and timings
+                        # Filter to only include sentences that had successful TTS
                         srt_path = None
                         if narration_script and subtitle_timings:
-                            srt_content = self.tts.generate_srt(narration_script, subtitle_timings)
+                            valid_sentences = [narration_script[i] for i in valid_indices if i < len(narration_script)]
+                            srt_content = self.tts.generate_srt(valid_sentences, subtitle_timings)
                             srt_path = os.path.join(audio_dir, "subtitles.srt")
                             with open(srt_path, "w", encoding="utf-8") as f:
                                 f.write(srt_content)
