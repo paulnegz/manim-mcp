@@ -524,6 +524,103 @@ def check_unused_variables(code: str) -> list[str]:
     return warnings
 
 
+# Shape classes that need explicit positioning when multiple are created
+SHAPE_CLASSES = {
+    "Rectangle", "Square", "Circle", "Ellipse", "Triangle", "Polygon",
+    "Line", "Arrow", "DashedLine", "Arc", "Dot", "Annulus", "Sector",
+    "RoundedRectangle", "RegularPolygon", "Star", "Cross",
+}
+
+# Methods that set position (called on shape variables)
+POSITION_METHODS = {
+    "to_edge", "to_corner", "move_to", "shift", "next_to", "align_to",
+    "set_x", "set_y", "set_z", "center", "to_center",
+}
+
+
+def check_unpositioned_shapes(code: str) -> list[str]:
+    """Check for multiple shapes created without explicit positioning.
+
+    When 2+ shape mobjects are created without positioning methods,
+    they will overlap at the origin - a common visual bug.
+
+    Args:
+        code: Python code to check
+
+    Returns:
+        List of warning messages for unpositioned shapes
+    """
+    warnings = []
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    # Track shape variables: name -> (line, class_name, has_position)
+    shape_vars: dict[str, tuple[int, str, bool]] = {}
+
+    class ShapePositionChecker(ast.NodeVisitor):
+        """Check for shape assignments and positioning method calls."""
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            # Check if RHS is a shape class instantiation
+            if isinstance(node.value, ast.Call):
+                func = node.value.func
+                class_name = None
+
+                if isinstance(func, ast.Name) and func.id in SHAPE_CLASSES:
+                    class_name = func.id
+                elif isinstance(func, ast.Attribute) and func.attr in SHAPE_CLASSES:
+                    class_name = func.attr
+
+                if class_name:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            shape_vars[target.id] = (node.lineno, class_name, False)
+
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            # Check for method chains like shape.to_edge(UP) or shape.shift(RIGHT)
+            if isinstance(node.func, ast.Attribute):
+                method_name = node.func.attr
+
+                if method_name in POSITION_METHODS:
+                    # Find the root variable being positioned
+                    current = node.func.value
+                    while isinstance(current, ast.Call) and isinstance(current.func, ast.Attribute):
+                        current = current.func.value
+
+                    if isinstance(current, ast.Name) and current.id in shape_vars:
+                        line, class_name, _ = shape_vars[current.id]
+                        shape_vars[current.id] = (line, class_name, True)
+
+            self.generic_visit(node)
+
+        def visit_Expr(self, node: ast.Expr) -> None:
+            # Also check for standalone positioning like: shape.to_edge(UP)
+            self.visit(node.value)
+
+    checker = ShapePositionChecker()
+    checker.visit(tree)
+
+    # Find unpositioned shapes
+    unpositioned = [(name, line, cls) for name, (line, cls, has_pos) in shape_vars.items() if not has_pos]
+
+    # Only warn if 2+ shapes are unpositioned (single shape at origin is often fine)
+    if len(unpositioned) >= 2:
+        names = ", ".join(f"'{name}' ({cls})" for name, line, cls in unpositioned[:4])
+        lines = ", ".join(str(line) for _, line, _ in unpositioned[:4])
+        warnings.append(
+            f"VISUAL_BUG: {len(unpositioned)} shapes created without positioning: {names} "
+            f"at lines {lines}. They will overlap at origin. "
+            f"Add .to_edge(), .to_corner(), .move_to(), or .shift() to position them."
+        )
+
+    return warnings
+
+
 async def _run_ruff(code: str) -> tuple[str, list[LintIssue]]:
     """Run ruff on code and return fixed code and issues.
 
@@ -753,6 +850,10 @@ async def lint_code(code: str) -> tuple[str, list[str]]:
     # Check for unused variables (informational, don't auto-fix)
     unused_warnings = check_unused_variables(fixed_code)
     warnings.extend(unused_warnings)
+
+    # Check for multiple shapes without positioning (visual bug prevention)
+    shape_warnings = check_unpositioned_shapes(fixed_code)
+    warnings.extend(shape_warnings)
 
     if auto_fixed:
         logger.info("[LINTER] Auto-fixed: %s", "; ".join(auto_fixed[:3]))
