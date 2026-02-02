@@ -19,7 +19,6 @@ include = [
 name = "manim-mcp"
 version = "0.1.0"
 description = "Text-to-video animation powered by manimgl and multi-agent LLM pipeline"
-readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
