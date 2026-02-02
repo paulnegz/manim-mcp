@@ -188,7 +188,7 @@ class GeminiTTSService:
 
     def stitch_audio_for_duration(
         self, segments: list[tuple[bytes, str] | Exception], target_duration: float
-    ) -> bytes:
+    ) -> tuple[bytes, list[tuple[int, int]]]:
         """Combine audio segments and adjust to fit target duration.
 
         If audio is shorter than target: add pauses between sentences
@@ -199,12 +199,13 @@ class GeminiTTSService:
             target_duration: Target duration in seconds
 
         Returns:
-            WAV bytes adjusted to approximately match target duration
+            Tuple of (WAV bytes, subtitle_timings) where timings are list of (start_ms, end_ms)
         """
-        # First, stitch without duration constraint to get base audio
-        combined = AudioSegment.empty()
+        # 1 second initial offset before audio/subtitles start
+        initial_offset_ms = 1000
 
         valid_segments = []
+        valid_indices = []  # Track original indices for subtitle correlation
         for i, segment_data in enumerate(segments):
             if isinstance(segment_data, Exception):
                 logger.warning("Skipping failed audio segment %d: %s", i, segment_data)
@@ -224,28 +225,32 @@ class GeminiTTSService:
                     audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt)
 
                 valid_segments.append(audio)
+                valid_indices.append(i)
             except Exception as e:
                 logger.warning("Failed to process audio segment %d: %s", i, e)
 
         if not valid_segments:
             raise ValueError("No valid audio segments to stitch")
 
-        # Calculate total audio duration without pauses
+        # Calculate total audio duration without pauses (excluding initial offset)
         total_audio_ms = sum(len(seg) for seg in valid_segments)
         target_ms = target_duration * 1000
 
+        # Account for initial offset in pause calculations
+        available_for_content = target_ms - initial_offset_ms
+
         # Calculate pause duration to distribute between segments
         if len(valid_segments) > 1:
-            available_pause_time = target_ms - total_audio_ms
+            available_pause_time = available_for_content - total_audio_ms
             pause_per_gap = max(1300, min(2000, available_pause_time / (len(valid_segments) - 1)))
         else:
             pause_per_gap = 0
 
         # If audio is too long even with minimal pauses, speed it up
         min_total = total_audio_ms + (len(valid_segments) - 1) * 1300  # 1300ms min pause
-        if min_total > target_ms:
+        if min_total > available_for_content:
             # Need to speed up - calculate required factor (max 1.3x)
-            speed_factor = min(1.3, min_total / target_ms)
+            speed_factor = min(1.3, min_total / available_for_content)
             logger.info("Speeding up audio by %.2fx to fit target duration", speed_factor)
             # Speed up by changing frame rate
             valid_segments = [
@@ -257,28 +262,109 @@ class GeminiTTSService:
             # Recalculate pause time
             total_audio_ms = sum(len(seg) for seg in valid_segments)
             if len(valid_segments) > 1:
-                available_pause_time = target_ms - total_audio_ms
+                available_pause_time = available_for_content - total_audio_ms
                 pause_per_gap = max(1300, available_pause_time / (len(valid_segments) - 1))
 
-        # Build final audio with calculated pauses
+        # Build final audio with initial silence and calculated pauses
+        # Also track subtitle timings
+        combined = AudioSegment.silent(duration=initial_offset_ms)
+        subtitle_timings: list[tuple[int, int]] = []
+        current_position_ms = initial_offset_ms
+
         silence = AudioSegment.silent(duration=int(pause_per_gap))
         for i, audio in enumerate(valid_segments):
             if i > 0:
                 combined += silence
+                current_position_ms += int(pause_per_gap)
+
+            # Record timing for this segment
+            start_ms = current_position_ms
+            end_ms = current_position_ms + len(audio)
+            subtitle_timings.append((start_ms, end_ms))
+
             combined += audio
+            current_position_ms = end_ms
 
         # If still shorter than target, add silence at end
         if len(combined) < target_ms:
             combined += AudioSegment.silent(duration=int(target_ms - len(combined)))
 
         logger.info(
-            "Audio adjusted: %d segments, %.1fs target, %.1fs result, %.0fms pauses",
-            len(valid_segments), target_duration, len(combined) / 1000, pause_per_gap
+            "Audio adjusted: %d segments, %.1fs target, %.1fs result, %.0fms pauses, %dms initial offset",
+            len(valid_segments), target_duration, len(combined) / 1000, pause_per_gap, initial_offset_ms
         )
 
         output = io.BytesIO()
         combined.export(output, format="wav")
-        return output.getvalue()
+        return output.getvalue(), subtitle_timings
+
+    @staticmethod
+    def generate_srt(sentences: list[str], timings: list[tuple[int, int]], window_size: int = 4) -> str:
+        """Generate SRT subtitle content with sliding window display.
+
+        Creates a sliding window subtitle effect where groups of words are shown
+        together, advancing one word at a time for smooth reading flow.
+
+        Args:
+            sentences: List of narration sentences
+            timings: List of (start_ms, end_ms) tuples for each sentence
+            window_size: Number of words to show at once (default 4)
+
+        Returns:
+            SRT-formatted subtitle string with sliding window timing
+
+        Example output (for "The quick brown fox jumps" with window_size=4):
+            1
+            00:00:01,000 --> 00:00:01,400
+            The quick brown fox
+
+            2
+            00:00:01,400 --> 00:00:01,800
+            quick brown fox jumps
+        """
+        def ms_to_srt_time(ms: int) -> str:
+            """Convert milliseconds to SRT timestamp format HH:MM:SS,mmm"""
+            hours = ms // 3600000
+            minutes = (ms % 3600000) // 60000
+            seconds = (ms % 60000) // 1000
+            millis = ms % 1000
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+        srt_lines = []
+        entry_num = 1
+        count = min(len(sentences), len(timings))
+
+        for i in range(count):
+            start_ms, end_ms = timings[i]
+            text = sentences[i].strip()
+            words = text.split()
+
+            if not words:
+                continue
+
+            # Calculate timing per word within this sentence
+            duration_ms = end_ms - start_ms
+            time_per_word = duration_ms / len(words)
+
+            # Sliding window: show window_size words at a time, advance by 1 word
+            num_windows = max(1, len(words) - window_size + 1)
+            time_per_window = duration_ms / num_windows
+
+            for j in range(num_windows):
+                window_start = int(start_ms + j * time_per_window)
+                window_end = int(start_ms + (j + 1) * time_per_window)
+
+                # Get the words for this window
+                window_words = words[j:j + window_size]
+                window_text = " ".join(window_words)
+
+                srt_lines.append(str(entry_num))
+                srt_lines.append(f"{ms_to_srt_time(window_start)} --> {ms_to_srt_time(window_end)}")
+                srt_lines.append(window_text)
+                srt_lines.append("")
+                entry_num += 1
+
+        return "\n".join(srt_lines)
 
     def stitch_audio(self, segments: list[tuple[bytes, str] | Exception]) -> bytes:
         """Combine audio segments with pauses, return WAV bytes."""

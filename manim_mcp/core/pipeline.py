@@ -1586,13 +1586,17 @@ The timing and visuals must sync with this script."""
             )
 
         # Build subtitle filter if SRT provided
+        # Add bottom padding for subtitle area so text doesn't overlap with rendered content
         subtitle_filter = ""
+        padding_filter = ""
         if srt_path and os.path.exists(srt_path):
             # Escape path for ffmpeg filter (colons and backslashes need escaping)
             escaped_path = srt_path.replace("\\", "\\\\").replace(":", "\\:")
-            # Force style for readability: white text with black outline
-            subtitle_filter = f",subtitles='{escaped_path}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Shadow=1,MarginV=30'"
-            logger.info("Burning subtitles from: %s", srt_path)
+            # Add 60px black bar at bottom for subtitle area
+            padding_filter = "pad=iw:ih+60:0:0:black,"
+            # Subtitles sit in the padded area with small margin from bottom edge
+            subtitle_filter = f",subtitles='{escaped_path}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Shadow=1,MarginV=12'"
+            logger.info("Burning subtitles from: %s (with 60px bottom padding)", srt_path)
 
         logger.info(
             "Mixing audio into video: %s (%.1fs adj) + %s (%.1fs) -> %s",
@@ -1611,7 +1615,7 @@ The timing and visuals must sync with this script."""
                 "-i", video_path,
                 "-i", audio_path,
                 "-filter_complex",
-                f"[0:v]{speed_filter}tpad=stop_mode=clone:stop_duration={pad_duration}{subtitle_filter}[v]",
+                f"[0:v]{speed_filter}{padding_filter}tpad=stop_mode=clone:stop_duration={pad_duration}{subtitle_filter}[v]",
                 "-map", "[v]",
                 "-map", "1:a",
                 "-c:v", "libx264", "-preset", "fast",
@@ -1631,7 +1635,7 @@ The timing and visuals must sync with this script."""
                 "-i", video_path,
                 "-i", audio_path,
                 "-filter_complex",
-                f"[0:v]{speed_filter}null{subtitle_filter}[v];[1:a]apad=whole_dur={adjusted_video_duration}[a]",
+                f"[0:v]{speed_filter}{padding_filter}null{subtitle_filter}[v];[1:a]apad=whole_dur={adjusted_video_duration}[a]",
                 "-map", "[v]",
                 "-map", "[a]",
                 "-c:v", "libx264", "-preset", "fast",
