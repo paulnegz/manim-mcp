@@ -724,7 +724,7 @@ class CodeGeneratorAgent(BaseAgent):
             logger.info("Code will follow %d-sentence narration script", len(narration_script))
 
         # Get RAG examples for few-shot context - TIERED PARALLEL APPROACH
-        # Tier 1: Critical (API sigs + scenes + graph) - always run in parallel
+        # Tier 1: Critical (API sigs + scenes + graph + components) - always run in parallel
         # Tier 2: Supplementary (patterns + errors) - only if tier 1 insufficient
         rag_context = ""
         high_quality_template = None
@@ -732,6 +732,8 @@ class CodeGeneratorAgent(BaseAgent):
         animation_patterns = []
         api_signatures = []
         method_sequences = []
+        reusable_components = []
+        helper_functions = []
 
         if self.rag_available and plan.rag_examples:
             logger.info("[RAG] Querying sources for code generation (tiered parallel)")
@@ -740,14 +742,16 @@ class CodeGeneratorAgent(BaseAgent):
             # - RAG examples (similar scenes for few-shot)
             # - API signatures (parameter correctness)
             # - Method sequences (in-memory graph, very fast)
+            # - Components/helpers (reusable building blocks)
             tier1_results = await asyncio.gather(
                 self._get_rag_examples(prompt, analysis),
                 self._get_api_signatures(prompt, analysis),
                 self._get_method_sequence_suggestions(analysis, plan),
+                self._get_components_and_helpers(prompt, analysis),
                 return_exceptions=True,
             )
 
-            rag_result, api_result, sequences_result = tier1_results
+            rag_result, api_result, sequences_result, comp_helper_result = tier1_results
 
             if isinstance(rag_result, tuple):
                 rag_context, high_quality_template = rag_result
@@ -763,6 +767,11 @@ class CodeGeneratorAgent(BaseAgent):
                 method_sequences = sequences_result
             elif isinstance(sequences_result, Exception):
                 logger.warning("[API-GRAPH] Error fetching method sequences: %s", sequences_result)
+
+            if isinstance(comp_helper_result, tuple):
+                reusable_components, helper_functions = comp_helper_result
+            elif isinstance(comp_helper_result, Exception):
+                logger.warning("[RAG] Error fetching components/helpers: %s", comp_helper_result)
 
             # TIER 2: Supplementary queries (parallel, but conditional)
             # Only fetch if we need more context
@@ -843,7 +852,7 @@ class CodeGeneratorAgent(BaseAgent):
         gen_prompt = self._build_prompt(
             prompt, analysis, plan, rag_context, high_quality_template,
             error_patterns, animation_patterns, api_signatures, narration_script,
-            method_sequences, extracted_patterns
+            method_sequences, extracted_patterns, reusable_components, helper_functions
         )
 
         # Generate code
@@ -1094,6 +1103,60 @@ class CodeGeneratorAgent(BaseAgent):
 
         return results[:4]  # Return up to 4 patterns
 
+    async def _get_components_and_helpers(
+        self,
+        prompt: str,
+        analysis: ConceptAnalysis,
+    ) -> tuple[list[dict], list[dict]]:
+        """Retrieve reusable VGroup components and helper functions from RAG.
+
+        Components are complete reusable classes (Pendulum, EnergyBars, etc.)
+        Helpers are utility functions (get_riemann_rectangles, create_axes, etc.)
+
+        Returns:
+            Tuple of (components, helpers) lists
+        """
+        if not self.rag_available:
+            return [], []
+
+        # Build search query from visual elements and prompt
+        visual_elements = analysis.visual_elements or []
+        search_query = f"{' '.join(visual_elements)} {prompt}"
+
+        components = []
+        helpers = []
+
+        try:
+            # Search components and helpers in parallel
+            comp_results, helper_results = await asyncio.gather(
+                self.rag.search_components(search_query, n_results=2),
+                self.rag.search_helpers(search_query, n_results=3),
+                return_exceptions=True,
+            )
+
+            if isinstance(comp_results, list):
+                components = comp_results
+                if components:
+                    logger.info(
+                        "[RAG] Found %d reusable components: %s",
+                        len(components),
+                        [c.get("metadata", {}).get("class_name", "?") for c in components],
+                    )
+
+            if isinstance(helper_results, list):
+                helpers = helper_results
+                if helpers:
+                    logger.info(
+                        "[RAG] Found %d helper functions: %s",
+                        len(helpers),
+                        [h.get("metadata", {}).get("func_name", "?") for h in helpers],
+                    )
+
+        except Exception as e:
+            logger.warning("[RAG] Components/helpers search failed: %s", e)
+
+        return components, helpers
+
     def _extract_method_names_from_prompt(
         self,
         prompt: str,
@@ -1236,6 +1299,8 @@ class CodeGeneratorAgent(BaseAgent):
         narration_script: list[str] | None = None,
         method_sequences: list[dict] | None = None,
         extracted_patterns: dict | None = None,
+        reusable_components: list[dict] | None = None,
+        helper_functions: list[dict] | None = None,
     ) -> str:
         """Build the code generation prompt with all context and extracted patterns."""
         parts = [
@@ -1339,6 +1404,56 @@ class CodeGeneratorAgent(BaseAgent):
                     "Use these idioms for consistent, high-quality animations:",
                     "",
                     formatted_patterns,
+                ])
+
+        # Add reusable components from 3b1b (VGroup classes)
+        if reusable_components:
+            parts.extend([
+                "",
+                "=" * 60,
+                "REUSABLE COMPONENTS (copy/adapt these VGroup classes)",
+                "=" * 60,
+                "",
+                "These proven components from 3b1b videos can be used directly:",
+                "",
+            ])
+            for comp in reusable_components[:2]:
+                content = comp.get("content", "")
+                meta = comp.get("metadata", {})
+                class_name = meta.get("class_name", "Component")
+                # Truncate very long components
+                if len(content) > 2000:
+                    content = content[:2000] + "\n    # ... (truncated)"
+                parts.extend([
+                    f"### {class_name}",
+                    "```python",
+                    content,
+                    "```",
+                    "",
+                ])
+
+        # Add helper functions from 3b1b (get_*, create_*, make_*)
+        if helper_functions:
+            parts.extend([
+                "",
+                "=" * 60,
+                "HELPER FUNCTIONS (use these utility functions)",
+                "=" * 60,
+                "",
+            ])
+            for helper in helper_functions[:3]:
+                content = helper.get("content", "")
+                meta = helper.get("metadata", {})
+                func_name = meta.get("func_name", "helper")
+                # Truncate if needed
+                if len(content) > 1000:
+                    content = content[:1000] + "\n    # ... (truncated)"
+                parts.extend([
+                    f"### {func_name}()",
+                    "```python",
+                    content,
+                    "```",
+                    "",
                 ])
 
         # Add error patterns to avoid

@@ -34,6 +34,9 @@ class ChromaDBService:
         self._intro_outro_collection = None
         self._characters_collection = None
         self._legacy_collection = None
+        self._components_collection = None  # Reusable VGroup/VMobject classes
+        self._helpers_collection = None  # Helper functions (get_*, create_*, etc.)
+        self._series_collection = None  # Video series metadata
         self._probe_searcher: ProbeSearcher | None = None
 
     async def initialize(self) -> None:
@@ -128,9 +131,29 @@ class ChromaDBService:
                 metadata={"description": "Legacy/archived 3b1b constructs for reference"},
             )
 
+            # New collections for components, helpers, and series
+            try:
+                self._components_collection = self._client.get_or_create_collection(
+                    name="manim_components",
+                    metadata={"description": "Reusable VGroup/VMobject component classes from 3b1b"},
+                )
+                self._helpers_collection = self._client.get_or_create_collection(
+                    name="manim_helpers",
+                    metadata={"description": "Helper functions (get_*, create_*, make_*) from 3b1b"},
+                )
+                self._series_collection = self._client.get_or_create_collection(
+                    name="video_series",
+                    metadata={"description": "Video series metadata for multi-part content"},
+                )
+            except Exception as e:
+                logger.warning("Failed to initialize new collections: %s", e)
+
             self.available = True
+            components_count = self._components_collection.count() if self._components_collection else 0
+            helpers_count = self._helpers_collection.count() if self._helpers_collection else 0
+            series_count = self._series_collection.count() if self._series_collection else 0
             logger.info(
-                "ChromaDB ready (scenes=%d, docs=%d, errors=%d, api=%d, patterns=%d, intro_outro=%d, characters=%d, legacy=%d)",
+                "ChromaDB ready (scenes=%d, docs=%d, errors=%d, api=%d, patterns=%d, intro_outro=%d, characters=%d, legacy=%d, components=%d, helpers=%d, series=%d)",
                 self._scenes_collection.count(),
                 self._docs_collection.count(),
                 self._errors_collection.count(),
@@ -139,6 +162,9 @@ class ChromaDBService:
                 self._intro_outro_collection.count(),
                 self._characters_collection.count(),
                 self._legacy_collection.count(),
+                components_count,
+                helpers_count,
+                series_count,
             )
 
             # Initialize Probe searcher for AST-aware code search
@@ -894,6 +920,254 @@ class ChromaDBService:
             logger.warning("Legacy pattern search failed: %s", e)
             return []
 
+    async def search_components(
+        self,
+        query: str,
+        n_results: int = 3,
+    ) -> list[dict]:
+        """Search for reusable VGroup/VMobject component classes.
+
+        Components are reusable visual building blocks like Pendulum, EnergyBars,
+        NumberLine, etc. from 3b1b videos. Use these to inject proven patterns
+        into generated code.
+
+        Args:
+            query: Description of desired component (e.g., "pendulum", "energy bars")
+            n_results: Number of results to return
+
+        Returns:
+            List of matching component classes with code
+        """
+        if not self.available or not self._components_collection:
+            return []
+
+        try:
+            results = self._components_collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"],
+            )
+
+            return self._format_results(results)
+
+        except Exception as e:
+            logger.warning("Component search failed: %s", e)
+            return []
+
+    async def search_helpers(
+        self,
+        query: str,
+        n_results: int = 5,
+    ) -> list[dict]:
+        """Search for helper functions (get_*, create_*, make_*).
+
+        Helper functions provide utility operations like get_riemann_rectangles,
+        create_axes, make_number_line, etc. These are often more reliable than
+        inline implementations.
+
+        Args:
+            query: Description of desired helper (e.g., "riemann rectangles", "graph label")
+            n_results: Number of results to return
+
+        Returns:
+            List of matching helper functions with code
+        """
+        if not self.available or not self._helpers_collection:
+            return []
+
+        try:
+            results = self._helpers_collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"],
+            )
+
+            return self._format_results(results)
+
+        except Exception as e:
+            logger.warning("Helper search failed: %s", e)
+            return []
+
+    async def search_series(
+        self,
+        query: str,
+        n_results: int = 3,
+    ) -> list[dict]:
+        """Search for video series metadata.
+
+        Series metadata helps understand how 3b1b structures multi-part videos.
+        Returns information about parts, shared files, and structure.
+
+        Args:
+            query: Topic or description (e.g., "linear algebra", "calculus")
+            n_results: Number of results to return
+
+        Returns:
+            List of matching series with metadata
+        """
+        if not self.available or not self._series_collection:
+            return []
+
+        try:
+            results = self._series_collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"],
+            )
+
+            return self._format_results(results)
+
+        except Exception as e:
+            logger.warning("Series search failed: %s", e)
+            return []
+
+    async def get_generation_context(
+        self,
+        prompt: str,
+        include_components: bool = True,
+        include_helpers: bool = True,
+        include_patterns: bool = True,
+        include_scenes: bool = True,
+        n_results: int = 3,
+    ) -> dict:
+        """Get unified context from all collections for code generation.
+
+        This is the main entry point for gathering RAG context before generating
+        Manim code. It queries multiple collections in parallel and returns
+        structured context for injection into the LLM prompt.
+
+        Pipeline flow:
+        1. Query animation_patterns → Get structure/approach
+        2. Query manim_components → Get reusable classes to import
+        3. Query manim_helpers → Get utility functions
+        4. Query manim_scenes → Get complete reference examples
+
+        Args:
+            prompt: User's animation request
+            include_components: Include reusable VGroup classes
+            include_helpers: Include get_*/create_*/make_* functions
+            include_patterns: Include animation pattern templates
+            include_scenes: Include complete scene examples
+            n_results: Results per collection
+
+        Returns:
+            Dict with 'patterns', 'components', 'helpers', 'scenes' keys,
+            each containing list of relevant results
+        """
+        import asyncio
+
+        context = {
+            "patterns": [],
+            "components": [],
+            "helpers": [],
+            "scenes": [],
+            "query": prompt,
+        }
+
+        if not self.available:
+            return context
+
+        # Build list of coroutines based on what's requested
+        tasks = {}
+
+        if include_patterns:
+            tasks["patterns"] = self.search_animation_patterns(prompt, n_results)
+
+        if include_components:
+            tasks["components"] = self.search_components(prompt, n_results)
+
+        if include_helpers:
+            tasks["helpers"] = self.search_helpers(prompt, n_results)
+
+        if include_scenes:
+            tasks["scenes"] = self.search_similar_scenes(prompt, n_results, prioritize_3b1b=True)
+
+        # Execute all searches in parallel
+        if tasks:
+            keys = list(tasks.keys())
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+            for key, result in zip(keys, results):
+                if isinstance(result, Exception):
+                    logger.warning("Generation context search failed for %s: %s", key, result)
+                    context[key] = []
+                else:
+                    context[key] = result
+
+        # Log what we found
+        logger.info(
+            "[RAG] Generation context: patterns=%d, components=%d, helpers=%d, scenes=%d",
+            len(context["patterns"]),
+            len(context["components"]),
+            len(context["helpers"]),
+            len(context["scenes"]),
+        )
+
+        return context
+
+    def format_context_for_prompt(self, context: dict, max_tokens: int = 8000) -> str:
+        """Format generation context into a string for LLM prompt injection.
+
+        Structures the context with clear sections and truncates if too long.
+        Prioritizes: patterns > components > helpers > scenes
+
+        Args:
+            context: Dict from get_generation_context()
+            max_tokens: Approximate max characters (rough token estimate)
+
+        Returns:
+            Formatted string ready for prompt injection
+        """
+        sections = []
+        char_budget = max_tokens * 4  # ~4 chars per token estimate
+
+        # 1. Animation patterns (highest priority - structural guidance)
+        if context.get("patterns"):
+            pattern_section = ["## Animation Patterns (structural guidance)"]
+            for p in context["patterns"][:2]:
+                content = p.get("content", "")[:1500]
+                meta = p.get("metadata", {})
+                pattern_section.append(f"### {meta.get('name', 'Pattern')}")
+                pattern_section.append(content)
+            sections.append("\n".join(pattern_section))
+
+        # 2. Reusable components (importable classes)
+        if context.get("components"):
+            comp_section = ["## Reusable Components (VGroup classes to use)"]
+            for c in context["components"][:2]:
+                content = c.get("content", "")[:2000]
+                meta = c.get("metadata", {})
+                comp_section.append(f"### {meta.get('class_name', 'Component')}")
+                comp_section.append(f"```python\n{content}\n```")
+            sections.append("\n".join(comp_section))
+
+        # 3. Helper functions
+        if context.get("helpers"):
+            helper_section = ["## Helper Functions (utility functions)"]
+            for h in context["helpers"][:3]:
+                content = h.get("content", "")[:1000]
+                meta = h.get("metadata", {})
+                helper_section.append(f"### {meta.get('func_name', 'helper')}")
+                helper_section.append(f"```python\n{content}\n```")
+            sections.append("\n".join(helper_section))
+
+        # 4. Reference scenes (complete examples)
+        if context.get("scenes"):
+            scene_section = ["## Reference Scenes (complete examples)"]
+            for s in context["scenes"][:2]:
+                content = s.get("content", "")[:2500]
+                meta = s.get("metadata", {})
+                scene_section.append(f"### {meta.get('scene_name', 'Scene')}")
+                scene_section.append(f"```python\n{content}\n```")
+            sections.append("\n".join(scene_section))
+
+        # Join and truncate if needed
+        full_context = "\n\n".join(sections)
+        if len(full_context) > char_budget:
+            full_context = full_context[:char_budget] + "\n... [truncated]"
+
+        return full_context
+
     async def search_similar_scenes(
         self,
         query: str,
@@ -1608,6 +1882,9 @@ class ChromaDBService:
             "intro_outro_count": 0,
             "characters_count": 0,
             "legacy_count": 0,
+            "components_count": 0,
+            "helpers_count": 0,
+            "series_count": 0,
         }
 
         if not self.available:
@@ -1630,6 +1907,12 @@ class ChromaDBService:
                 stats["characters_count"] = self._characters_collection.count()
             if self._legacy_collection:
                 stats["legacy_count"] = self._legacy_collection.count()
+            if self._components_collection:
+                stats["components_count"] = self._components_collection.count()
+            if self._helpers_collection:
+                stats["helpers_count"] = self._helpers_collection.count()
+            if self._series_collection:
+                stats["series_count"] = self._series_collection.count()
         except Exception as e:
             logger.warning("Failed to get collection stats: %s", e)
 
