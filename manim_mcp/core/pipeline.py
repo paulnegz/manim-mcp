@@ -129,8 +129,24 @@ class AnimationPipeline:
                 )
                 logger.info("Started parallel: video render + audio generation")
 
-            # Render video
-            result = await self._render_with_retries(render_id, code, scene_name, params, prompt)
+            # Render video with periodic progress updates during long render
+            render_task = asyncio.create_task(
+                self._render_with_retries(render_id, code, scene_name, params, prompt)
+            )
+
+            # Send periodic progress updates while rendering (30%→55%)
+            render_progress = 30
+            while not render_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(render_task), timeout=10.0)
+                except asyncio.TimeoutError:
+                    # Still rendering - send progress update
+                    if render_progress < 55:
+                        render_progress += 3  # Increment progress slowly
+                    await report("rendering", render_progress)
+                    logger.debug(f"Render in progress... {render_progress}%")
+
+            result = render_task.result()
             await report("uploading", 60)
 
             # Wait for audio and mix (60-90%)
@@ -360,8 +376,24 @@ class AnimationPipeline:
                 )
                 logger.info("Started parallel: video render + audio generation")
 
-            # Render video
-            result = await self._render_and_upload(render_id, code, scene_name, params)
+            # Render video with periodic progress updates during long render
+            render_task = asyncio.create_task(
+                self._render_and_upload(render_id, code, scene_name, params)
+            )
+
+            # Send periodic progress updates while rendering (30%→55%)
+            render_progress = 30
+            while not render_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(render_task), timeout=10.0)
+                except asyncio.TimeoutError:
+                    # Still rendering - send progress update
+                    if render_progress < 55:
+                        render_progress += 3  # Increment progress slowly
+                    await report("rendering", render_progress)
+                    logger.debug(f"Render in progress... {render_progress}%")
+
+            result = render_task.result()
             await report("uploading", 60)
 
             # Wait for audio and mix (60-90%)
@@ -570,9 +602,27 @@ class AnimationPipeline:
 
             # 5. Render + upload with retry on runtime errors (35-90%)
             await report("rendering", 40)
-            result = await self._render_with_retries(
-                new_id, edited_code, scene_name, params, original.original_prompt or instructions
+
+            # Render with periodic progress updates
+            render_task = asyncio.create_task(
+                self._render_with_retries(
+                    new_id, edited_code, scene_name, params, original.original_prompt or instructions
+                )
             )
+
+            # Send periodic progress updates while rendering (40%→85%)
+            render_progress = 40
+            while not render_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(render_task), timeout=10.0)
+                except asyncio.TimeoutError:
+                    # Still rendering - send progress update
+                    if render_progress < 85:
+                        render_progress += 5
+                    await report("rendering", render_progress)
+                    logger.debug(f"Edit render in progress... {render_progress}%")
+
+            result = render_task.result()
             await report("uploading", 90)
 
             # Transcode for mobile compatibility

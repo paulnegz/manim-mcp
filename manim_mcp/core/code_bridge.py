@@ -1733,8 +1733,9 @@ def bridge_code(
 
     # Fix layout issues (3b1b patterns: buff on edges, collision avoidance)
     try:
-        from manim_mcp.core.layout_validator import validate_and_fix_layout
+        from manim_mcp.core.layout_validator import validate_and_fix_layout, auto_position_shapes
         code = validate_and_fix_layout(code)
+        code = auto_position_shapes(code)  # Auto-position overlapping shapes
     except ImportError:
         logger.debug("[CODE-BRIDGE] layout_validator not available, skipping")
     except Exception as e:

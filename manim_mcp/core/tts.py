@@ -299,29 +299,33 @@ class GeminiTTSService:
         return output.getvalue(), subtitle_timings
 
     @staticmethod
-    def generate_srt(sentences: list[str], timings: list[tuple[int, int]], window_size: int = 4) -> str:
-        """Generate SRT subtitle content with sliding window display.
+    def generate_srt(sentences: list[str], timings: list[tuple[int, int]], chunk_size: int = 4) -> str:
+        """Generate SRT subtitle content with chunked display.
 
-        Creates a sliding window subtitle effect where groups of words are shown
-        together, advancing one word at a time for smooth reading flow.
+        Creates chunked subtitles where groups of words are shown together,
+        then entirely replaced with the next chunk for easier reading.
+        Each chunk displays for at least 1.2 seconds to ensure readability.
 
         Args:
             sentences: List of narration sentences
             timings: List of (start_ms, end_ms) tuples for each sentence
-            window_size: Number of words to show at once (default 4)
+            chunk_size: Number of words per chunk (default 4)
 
         Returns:
-            SRT-formatted subtitle string with sliding window timing
+            SRT-formatted subtitle string with chunked timing
 
-        Example output (for "The quick brown fox jumps" with window_size=4):
+        Example output (for "The quick brown fox jumps over" with chunk_size=4):
             1
-            00:00:01,000 --> 00:00:01,400
+            00:00:01,000 --> 00:00:02,200
             The quick brown fox
 
             2
-            00:00:01,400 --> 00:00:01,800
-            quick brown fox jumps
+            00:00:02,200 --> 00:00:03,400
+            jumps over
         """
+        # Minimum display time per chunk (ms) - ~300ms per word for comfortable reading
+        MIN_CHUNK_DURATION_MS = 1200
+
         def ms_to_srt_time(ms: int) -> str:
             """Convert milliseconds to SRT timestamp format HH:MM:SS,mmm"""
             hours = ms // 3600000
@@ -344,25 +348,31 @@ class GeminiTTSService:
 
             # Calculate timing per word within this sentence
             duration_ms = end_ms - start_ms
-            time_per_word = duration_ms / len(words)
+            num_chunks = (len(words) + chunk_size - 1) // chunk_size  # ceiling division
 
-            # Sliding window: show window_size words at a time, advance by 1 word
-            num_windows = max(1, len(words) - window_size + 1)
-            time_per_window = duration_ms / num_windows
+            # Calculate time per chunk, ensuring minimum readable duration
+            time_per_chunk = max(MIN_CHUNK_DURATION_MS, duration_ms / num_chunks)
 
-            for j in range(num_windows):
-                window_start = int(start_ms + j * time_per_window)
-                window_end = int(start_ms + (j + 1) * time_per_window)
+            chunk_start_ms = start_ms
+            for j in range(num_chunks):
+                chunk_start_word = j * chunk_size
+                chunk_end_word = min((j + 1) * chunk_size, len(words))
 
-                # Get the words for this window
-                window_words = words[j:j + window_size]
-                window_text = " ".join(window_words)
+                # End time: start + duration, but don't exceed sentence end
+                chunk_end_ms = min(int(chunk_start_ms + time_per_chunk), end_ms)
+
+                # Get the words for this chunk
+                chunk_words = words[chunk_start_word:chunk_end_word]
+                chunk_text = " ".join(chunk_words)
 
                 srt_lines.append(str(entry_num))
-                srt_lines.append(f"{ms_to_srt_time(window_start)} --> {ms_to_srt_time(window_end)}")
-                srt_lines.append(window_text)
+                srt_lines.append(f"{ms_to_srt_time(int(chunk_start_ms))} --> {ms_to_srt_time(chunk_end_ms)}")
+                srt_lines.append(chunk_text)
                 srt_lines.append("")
                 entry_num += 1
+
+                # Next chunk starts where this one ends
+                chunk_start_ms = chunk_end_ms
 
         return "\n".join(srt_lines)
 

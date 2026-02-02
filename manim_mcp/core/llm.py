@@ -136,8 +136,16 @@ class GeminiClient(BaseLLMClient):
                 contents=prompt,
                 config=self._genai.types.GenerateContentConfig(
                     system_instruction=self._generate_system,
+                    max_output_tokens=8192,  # Prevent truncation for complex animations
                 ),
             )
+            # Check for truncation
+            if hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'finish_reason'):
+                    finish_reason = str(candidate.finish_reason)
+                    if 'MAX_TOKENS' in finish_reason or 'LENGTH' in finish_reason:
+                        logger.warning(f"[GEMINI] Response may be truncated: {finish_reason}")
             return _strip_fences(response.text)
 
         return await self._retry_with_backoff(_call, self.config.llm_max_retries)
@@ -152,6 +160,7 @@ class GeminiClient(BaseLLMClient):
                 contents=user_prompt,
                 config=self._genai.types.GenerateContentConfig(
                     system_instruction=get_edit_system(),
+                    max_output_tokens=8192,  # Prevent truncation
                 ),
             )
             return _strip_fences(response.text)
@@ -169,6 +178,7 @@ class GeminiClient(BaseLLMClient):
                 contents=user_prompt,
                 config=self._genai.types.GenerateContentConfig(
                     system_instruction=get_fix_system(),
+                    max_output_tokens=8192,  # Prevent truncation
                 ),
             )
             return _strip_fences(response.text)
