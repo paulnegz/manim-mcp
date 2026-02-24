@@ -765,6 +765,10 @@ def transform_ce_to_manimgl(code: str) -> tuple[str, list[str]]:
         (r"\.set_stroke_opacity\s*\(\s*([^)]+)\s*\)", r".set_stroke(opacity=\1)"),
         # set_fill_opacity doesn't exist in manimgl - use set_fill(opacity=X)
         (r"\.set_fill_opacity\s*\(\s*([^)]+)\s*\)", r".set_fill(opacity=\1)"),
+        # set_color(COLOR1, COLOR2) - manimgl treats 2nd arg as opacity, not gradient
+        # Catches: .set_color(RED, RED_E) .set_color(BLUE, BLUE_D) etc.
+        # Converts to just .set_color(COLOR1) to avoid TypeError: len() of unsized object
+        (r"\.set_color\s*\(\s*([A-Z][A-Z_0-9]*)\s*,\s*[A-Z][A-Z_0-9]*\s*\)", r".set_color(\1)"),
     ]
     for pattern, replacement in post_replacements:
         # Extract the class/function name from pattern (e.g., r"\bCreate\s*\(" -> "Create")
