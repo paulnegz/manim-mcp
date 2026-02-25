@@ -164,13 +164,24 @@ def cli_main() -> None:
         import logging
         logging.basicConfig(level=logging.DEBUG)
 
-    # serve is special — it hands off to the MCP server
+    # serve is special -- it hands off to the MCP server
     if args.command == "serve":
         import os
-        from manim_mcp.server import create_server
-        server = create_server()
-        # FastMCP uses UVICORN_HOST/UVICORN_PORT env vars (set in docker-compose)
-        server.run(transport=args.transport)
+        sse_enabled = os.environ.get("MANIM_MCP_SSE_ENABLED", "true").lower() in ("true", "1", "yes")
+
+        if sse_enabled and args.transport == "streamable-http":
+            # Use the combined Starlette app with SSE progress endpoint
+            from manim_mcp.server import create_app
+            import uvicorn
+            host = os.environ.get("MANIM_MCP_SERVER_HOST", "0.0.0.0")
+            port = int(os.environ.get("MANIM_MCP_SERVER_PORT", "8000"))
+            app = create_app()
+            uvicorn.run(app, host=host, port=port)
+        else:
+            # Plain MCP server without SSE
+            from manim_mcp.server import create_server
+            server = create_server()
+            server.run(transport=args.transport)
         return
 
     # Everything else runs through the async dispatcher

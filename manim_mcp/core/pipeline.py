@@ -1,4 +1,4 @@
-"""Text-to-video pipeline: prompt → Gemini → validate → render → upload."""
+"""Text-to-video pipeline: prompt -> Gemini -> validate -> render -> upload."""
 
 from __future__ import annotations
 
@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING, Callable, Awaitable
 
 # Type alias for progress callback: async fn(stage: str, percent: int) -> None
 ProgressCallback = Callable[[str, int], Awaitable[None]]
+
+# Type alias for thumbnail callback: fn(render_id: str, thumb_url: str) -> None
+# Synchronous because it just pushes to a queue (no I/O).
+ThumbnailCallback = Callable[[str, str], None]
 
 from manim_mcp.exceptions import CodeValidationError, ManimMCPError
 from manim_mcp.models import (
@@ -91,9 +95,11 @@ class AnimationPipeline:
         prompt: str,
         params: RenderParams | None = None,
         progress_callback: ProgressCallback | None = None,
+        thumbnail_callback: ThumbnailCallback | None = None,
+        render_id: str | None = None,
     ) -> AnimationResult:
         params = params or RenderParams()
-        render_id = uuid.uuid4().hex[:12]
+        render_id = render_id or uuid.uuid4().hex[:12]
         await self.tracker.create_render(
             render_id, quality=params.quality.value, fmt=params.fmt.value, original_prompt=prompt,
         )
@@ -134,7 +140,7 @@ class AnimationPipeline:
                 self._render_with_retries(render_id, code, scene_name, params, prompt)
             )
 
-            # Send periodic progress updates while rendering (30%→55%)
+            # Send periodic progress updates while rendering (30%->55%)
             render_progress = 30
             while not render_task.done():
                 try:
@@ -147,6 +153,12 @@ class AnimationPipeline:
                     logger.debug(f"Render in progress... {render_progress}%")
 
             result = render_task.result()
+            await report("uploading", 55)
+
+            # 3b. Early thumbnail extraction (Phase 4B) - send preview before post-processing
+            await self._extract_early_thumbnail(
+                result.local_path, render_id, thumbnail_callback,
+            )
             await report("uploading", 60)
 
             # Wait for audio and mix (60-90%)
@@ -314,14 +326,16 @@ class AnimationPipeline:
         prompt: str,
         params: RenderParams | None = None,
         progress_callback: ProgressCallback | None = None,
+        thumbnail_callback: ThumbnailCallback | None = None,
+        render_id: str | None = None,
     ) -> AnimationResult:
         """Multi-agent generation with RAG context.
 
         Uses the 4-agent pipeline:
-        1. ConceptAnalyzer → domain, complexity, concepts
-        2. ScenePlanner → structure, timing, RAG examples
-        3. CodeGenerator → code with RAG few-shot context
-        4. CodeReviewer → quality check and fixes
+        1. ConceptAnalyzer - domain, complexity, concepts
+        2. ScenePlanner - structure, timing, RAG examples
+        3. CodeGenerator - code with RAG few-shot context
+        4. CodeReviewer - quality check and fixes
 
         Falls back to simple generation if agents fail.
 
@@ -329,12 +343,14 @@ class AnimationPipeline:
             prompt: Text description of the animation
             params: Render parameters (quality, format, etc.)
             progress_callback: Optional callback for progress updates
+            thumbnail_callback: Optional callback for early thumbnail URL
+            render_id: Optional pre-generated render ID (for SSE tracking)
 
         Returns:
             AnimationResult with render details
         """
         params = params or RenderParams()
-        render_id = uuid.uuid4().hex[:12]
+        render_id = render_id or uuid.uuid4().hex[:12]
         await self.tracker.create_render(
             render_id,
             quality=params.quality.value,
@@ -383,7 +399,7 @@ class AnimationPipeline:
                 self._render_and_upload(render_id, code, scene_name, params)
             )
 
-            # Send periodic progress updates while rendering (30%→55%)
+            # Send periodic progress updates while rendering (30%->55%)
             render_progress = 30
             while not render_task.done():
                 try:
@@ -396,6 +412,12 @@ class AnimationPipeline:
                     logger.debug(f"Render in progress... {render_progress}%")
 
             result = render_task.result()
+            await report("uploading", 55)
+
+            # 4b. Early thumbnail extraction (Phase 4B)
+            await self._extract_early_thumbnail(
+                result.local_path, render_id, thumbnail_callback,
+            )
             await report("uploading", 60)
 
             # Wait for audio and mix (60-90%)
@@ -564,6 +586,8 @@ class AnimationPipeline:
         instructions: str,
         params: RenderParams | None = None,
         progress_callback: ProgressCallback | None = None,
+        thumbnail_callback: ThumbnailCallback | None = None,
+        new_render_id: str | None = None,
     ) -> AnimationResult:
         params = params or RenderParams()
 
@@ -578,7 +602,7 @@ class AnimationPipeline:
             raise ManimMCPError(f"Render '{render_id}' has no source code to edit")
 
         # 2. Create new render record linked to parent
-        new_id = uuid.uuid4().hex[:12]
+        new_id = new_render_id or uuid.uuid4().hex[:12]
         await self.tracker.create_render(
             new_id,
             parent_render_id=render_id,
@@ -627,6 +651,12 @@ class AnimationPipeline:
                     logger.debug(f"Edit render in progress... {render_progress}%")
 
             result = render_task.result()
+            await report("uploading", 88)
+
+            # Early thumbnail extraction for edit renders
+            await self._extract_early_thumbnail(
+                result.local_path, new_id, thumbnail_callback,
+            )
             await report("uploading", 90)
 
             # Transcode for mobile compatibility
@@ -1269,6 +1299,90 @@ The timing and visuals must sync with this script."""
                 hints.append("Unbalanced LaTeX braces { }")
 
         return "; ".join(hints) if hints else ""
+
+    async def _extract_early_thumbnail(
+        self,
+        video_path: str | None,
+        render_id: str,
+        thumbnail_callback: ThumbnailCallback | None,
+    ) -> None:
+        """Extract the first meaningful frame from a freshly rendered video.
+
+        Runs right after Manim finishes, before audio mixing or video
+        slowdown.  The thumbnail is uploaded to S3 and pushed to SSE
+        subscribers so the client gets an early preview.
+
+        This is intentionally fire-and-forget: failures are logged but
+        never propagate.
+        """
+        if not video_path or not os.path.exists(video_path):
+            return
+        if not shutil.which("ffmpeg"):
+            return
+
+        import tempfile
+        thumb_path = os.path.join(
+            tempfile.gettempdir(), f"{render_id}_early_thumb.png"
+        )
+
+        try:
+            # Extract frame at 2s (or first frame if video is shorter)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-vframes", "1",
+                "-ss", "2",
+                "-q:v", "2",
+                thumb_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=10)
+
+            if not os.path.exists(thumb_path):
+                # Fallback: try first frame (video may be < 2s)
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y",
+                    "-i", video_path,
+                    "-vframes", "1",
+                    "-q:v", "2",
+                    thumb_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=10)
+
+            if not os.path.exists(thumb_path):
+                logger.debug("Early thumbnail extraction produced no file")
+                return
+
+            # Upload to S3 and get a presigned URL
+            thumb_url: str | None = None
+            if self.storage.available:
+                thumb_key = f"{self.config.s3_prefix}{render_id}/early_thumbnail.png"
+                try:
+                    await self.storage.upload_file(thumb_path, thumb_key, "image/png")
+                    thumb_url = await self.storage.generate_presigned_url(thumb_key)
+                    logger.info("Early thumbnail uploaded: %s", thumb_key)
+                except Exception as exc:
+                    logger.debug("Early thumbnail upload failed: %s", exc)
+
+            # Notify SSE subscribers
+            if thumb_url and thumbnail_callback:
+                try:
+                    thumbnail_callback(render_id, thumb_url)
+                except Exception as exc:
+                    logger.debug("Thumbnail callback failed: %s", exc)
+
+        except Exception as exc:
+            logger.debug("Early thumbnail extraction failed: %s", exc)
+        finally:
+            # Clean up temp file
+            try:
+                if os.path.exists(thumb_path):
+                    os.unlink(thumb_path)
+            except Exception:
+                pass
 
     async def _generate_thumbnail(self, video_path: str, render_id: str) -> tuple[str | None, str | None, str | None]:
         """Generate thumbnail and return (presigned_url, s3_key, local_path).
